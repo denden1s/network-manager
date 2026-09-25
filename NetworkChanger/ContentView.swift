@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// Окно-поповер из menu-bar иконки: два Toggle + статус + Apply.
 struct ContentView: View {
@@ -72,6 +73,7 @@ struct ContentView: View {
                     .keyboardShortcut(.defaultAction)
                 Button("Refresh") { manager.refresh() }
                     .disabled(manager.isApplying)
+                Button("Quit") { NSApplication.shared.terminate(nil) }
                 Spacer()
                 if manager.isApplying {
                     ProgressView()
