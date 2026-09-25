@@ -59,12 +59,15 @@ struct NetworkStatus {
 }
 
 /// Обёртка над `/usr/sbin/networksetup`.
-/// Все чтения выполняются напрямую, все изменения — через
+/// Все чтения выполняются напрямую, все изменения — через `runPrivileged`:
+/// сначала пробуем `sudo -n` без промпта (NOPASSWD-allowlist из
+/// scripts/install-passwordless-sudo.sh), при неудаче — fallback на
 /// `osascript -e 'do shell script "..." with administrator privileges'`
 /// (системный prompt пароля, без SMJobBless).
 final class NetworkManager: ObservableObject {
     static let networksetup = "/usr/sbin/networksetup"
     static let osascript = "/usr/bin/osascript"
+    static let sudo = "/usr/bin/sudo"
     static let airportCLI = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
 
     @Published var currentLocation: String = "…"
@@ -77,6 +80,7 @@ final class NetworkManager: ObservableObject {
     @Published var lastSummary: String?
     @Published var lastScan: [String] = []
     @Published var connectionInfo: String = "unknown"
+    @Published var passwordlessReady: Bool = false
 
     // MARK: - Low-level execution
 
@@ -104,9 +108,30 @@ final class NetworkManager: ObservableObject {
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Запуск произвольной shell-команды С привилегиями через системный prompt пароля.
+    /// Запуск произвольной shell-команды С привилегиями.
+    /// Путь 1 (без промпта): `sudo -n` — срабатывает, если установлен
+    /// NOPASSWD-allowlist (scripts/install-passwordless-sudo.sh).
+    /// Путь 2 (fallback): системный prompt через osascript
+    /// `do shell script "..." with administrator privileges` (код сохранён как есть).
+    /// Stderr попытки sudo -n виден только если упали ОБА пути (объединяем в ошибке).
     @discardableResult
     func runPrivileged(_ shellCommand: String) throws -> String {
+        // Путь 1: sudo -n без промпта.
+        let sudoProcess = Process()
+        sudoProcess.executableURL = URL(fileURLWithPath: Self.sudo)
+        sudoProcess.arguments = ["-n", "sh", "-c", shellCommand]
+        let sudoOutPipe = Pipe()
+        let sudoErrPipe = Pipe()
+        sudoProcess.standardOutput = sudoOutPipe
+        sudoProcess.standardError = sudoErrPipe
+        try sudoProcess.run()
+        sudoProcess.waitUntilExit()
+        let sudoOut = String(data: sudoOutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let sudoErr = String(data: sudoErrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        if sudoProcess.terminationStatus == 0 {
+            return sudoOut.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // Путь 2 (fallback): системный prompt — код сохранён как есть.
         // Экранируем для двойных кавычек внутри AppleScript-строки.
         let escaped = shellCommand
             .replacingOccurrences(of: "\\", with: "\\\\")
@@ -133,7 +158,7 @@ final class NetworkManager: ObservableObject {
             throw NetworkManagerError.commandFailed(
                 command: shellCommand,
                 exitCode: status,
-                output: (out + "\n" + err).trimmingCharacters(in: .whitespacesAndNewlines)
+                output: "sudo -n failed: \(sudoErr.trimmingCharacters(in: .whitespacesAndNewlines))\nosascript failed: \((out + "\n" + err).trimmingCharacters(in: .whitespacesAndNewlines))"
             )
         }
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -183,6 +208,27 @@ final class NetworkManager: ObservableObject {
     }
 
     // MARK: - Getters (без привилегий)
+
+    /// Проверка passwordless-режима через `sudo -n -l` (что разрешён NOPASSWD
+    /// для networksetup), без throws. Не зависит от свежести sudo-timestamp,
+    /// в отличие от `sudo -n true`. Используется UI, чтобы прятать кнопку "Enable passwordless".
+    func isPasswordless() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.sudo)
+        process.arguments = ["-n", "-l"]
+        let outPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return false }
+        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return out.contains("NOPASSWD") && out.contains("networksetup")
+    }
 
     /// `networksetup -getcurrentlocation` -> "ethernet_work" / "ethernet_home".
     func getCurrentLocation() throws -> String {
@@ -304,7 +350,7 @@ final class NetworkManager: ObservableObject {
         return "\(ssid), IP \(ip)"
     }
 
-    // MARK: - Setters (с привилегиями, через системный prompt)
+    // MARK: - Setters (с привилегиями: сначала sudo -n, fallback — системный prompt)
 
     /// `networksetup -switchtolocation <location>` (sudo).
     func switchLocation(_ location: String) throws {
@@ -334,6 +380,30 @@ final class NetworkManager: ObservableObject {
         try runPrivileged("/usr/bin/dscacheutil -flushcache; /usr/bin/killall -HUP mDNSResponder")
     }
 
+    /// Установка passwordless sudoers-allowlist через scripts/install-passwordless-sudo.sh.
+    /// Запуск — через привилегированный путь (один системный промпт),
+    /// возвращает stdout скрипта или бросает commandFailed с его выводом.
+    /// Скрипт должен лежать в Resources бандла (см. README → Passwordless).
+    @discardableResult
+    func installPasswordless() throws -> String {
+        guard let resourcePath = Bundle.main.resourcePath else {
+            throw NetworkManagerError.commandFailed(
+                command: "install-passwordless-sudo.sh",
+                exitCode: -1,
+                output: "Bundle.main.resourcePath is nil"
+            )
+        }
+        let scriptPath = (resourcePath as NSString).appendingPathComponent("install-passwordless-sudo.sh")
+        guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
+            throw NetworkManagerError.commandFailed(
+                command: scriptPath,
+                exitCode: -1,
+                output: "Script not found in app Resources. See README → Passwordless: add scripts/install-passwordless-sudo.sh to Copy Files → Resources."
+            )
+        }
+        return try runPrivileged("/bin/sh \(Self.shellQuote(scriptPath))")
+    }
+
     // MARK: - High-level logic
 
     /// Обновить статус (вызывать из UI). Тяжёлая работа — в фоне.
@@ -342,6 +412,7 @@ final class NetworkManager: ObservableObject {
             guard let self = self else { return }
             var status = NetworkStatus()
             var failure: String?
+            let passwordless = self.isPasswordless()
             do {
                 status.wifiDevice = try self.detectWiFiDevice()
                 status.location = try self.getActiveEthernetService()
@@ -356,6 +427,7 @@ final class NetworkManager: ObservableObject {
             }
             let capturedStatus = status
             let capturedFailure = failure
+            let capturedPasswordless = passwordless
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.wifiDevice = capturedStatus.wifiDevice
@@ -364,6 +436,7 @@ final class NetworkManager: ObservableObject {
                 self.wifiServices = capturedStatus.wifiServices
                 self.currentDNS = capturedStatus.dnsByService
                 self.connectionInfo = capturedStatus.connectionInfo
+                self.passwordlessReady = capturedPasswordless
                 self.lastError = capturedFailure
             }
         }

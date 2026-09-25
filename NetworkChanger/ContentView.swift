@@ -78,6 +78,11 @@ struct ContentView: View {
                 Button("Refresh") { manager.refresh() }
                     .disabled(manager.isApplying)
                 Button("Quit") { NSApplication.shared.terminate(nil) }
+                if !manager.passwordlessReady {
+                    Button("Enable passwordless") { enablePasswordless() }
+                        .disabled(manager.isApplying)
+                        .help("Один раз спросит пароль, дальше Apply без промптов")
+                }
                 Spacer()
                 if manager.isApplying {
                     ProgressView()
@@ -99,6 +104,29 @@ struct ContentView: View {
 
     private func apply() {
         manager.apply(profile: profile, wifiOn: wifiOn)
+    }
+
+    private func enablePasswordless() {
+        manager.isApplying = true
+        manager.lastError = nil
+        manager.lastSummary = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let out = try manager.installPasswordless()
+                let text = out.trimmingCharacters(in: .whitespacesAndNewlines)
+                DispatchQueue.main.async {
+                    manager.isApplying = false
+                    manager.lastSummary = text.isEmpty ? "Passwordless sudo installed." : text
+                    manager.refresh()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    manager.isApplying = false
+                    manager.lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    manager.refresh()
+                }
+            }
+        }
     }
 
     private func copyDiagnostics() {

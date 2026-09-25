@@ -60,3 +60,37 @@ xcodebuild -project NetworkChanger.xcodeproj -scheme NetworkChanger -configurati
 - `NetworkChanger/ContentView.swift` — два Toggle (профиль Work/Home, Wi-Fi ON/OFF), статус, Apply/Refresh
 - `NetworkChanger/NetworkManager.swift` — вся обёртка над `networksetup` + `runPrivileged` через osascript
 - `NetworkChanger/Info.plist` — `LSUIElement`, `NSAppleEventsUsageDescription`
+
+## Passwordless (один пароль навсегда)
+
+Чтобы спрашивать пароль один раз при установке и дальше работать без промптов,
+приложение использует sudoers-allowlist (GUI НЕ запускается под root, SMJobBless НЕ используется).
+
+Как включить:
+1. Нажми **Enable passwordless** в поповере (рядом с Quit) — появится один системный
+   промпт пароля, дальше все Apply проходят без запросов. Кнопка прячется сама,
+   когда режим активен (проверка `sudo -n true` при каждом refresh).
+2. Или вручную из терминала:
+   ```bash
+   sudo ./scripts/install-passwordless-sudo.sh
+   ```
+
+Что пишется в sudoers: файл `/etc/sudoers.d/network-changer` (права `0440`,
+синтаксис проверяется через `visudo -cf`):
+```
+%admin ALL=(root) NOPASSWD: /usr/sbin/networksetup -setairportpower *, /usr/sbin/networksetup -setnetworkserviceenabled *, /usr/sbin/networksetup -setdnsservers *, /usr/bin/dscacheutil -flushcache, /usr/bin/killall -HUP mDNSResponder
+```
+
+Как это работает: `runPrivileged` сначала пробует `sudo -n sh -c <команда>` без промпта
+и только если allowlist не установлен — показывает системный промпт через osascript.
+
+Как откатить:
+```bash
+sudo rm /etc/sudoers.d/network-changer
+```
+
+Важно для сборки: `scripts/install-passwordless-sudo.sh` должен попадать в Resources
+приложения (кнопка ищет его в `Bundle.main.resourcePath`), иначе установка из UI
+упадёт с ошибкой «Script not found in app Resources». `*.pbxproj` здесь не правится —
+добавь файл в Xcode вручную: Target → Build Phases → Copy Files (Destination: Resources,
+Subpath пустой) → `+` → `scripts/install-passwordless-sudo.sh`.
