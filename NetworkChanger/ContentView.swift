@@ -1,34 +1,25 @@
 import SwiftUI
-import AppKit
 
-/// Окно-поповер из menu-bar иконки: тогглы всех служб + статус + Quit.
+/// Окно-поповер из menu-bar иконки: тогглы всех служб + статус.
 struct ContentView: View {
     @ObservedObject var manager: NetworkManager
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Network Changer")
+            Text("Network Manager")
                 .font(.headline)
 
-            // Все сетевые службы системы, у каждой свой on/off тоггл + её DNS под ней.
+            // Все сетевые службы системы, у каждой свой on/off тоггл.
             ForEach(manager.services) { service in
-                VStack(alignment: .leading, spacing: 2) {
-                    Toggle(isOn: Binding(
-                        get: { service.enabled },
-                        set: { newValue in
-                            manager.setService(name: service.name, enabled: newValue)
-                        }
-                    )) {
-                        Label(service.name, systemImage: NetworkManager.isWiFiService(service.name) ? "wifi" : "cable.connector")
+                Toggle(isOn: Binding(
+                    get: { service.enabled },
+                    set: { newValue in
+                        manager.setService(name: service.name, enabled: newValue)
                     }
-                    .toggleStyle(.switch)
-                    if let dns = manager.currentDNS[service.name] {
-                        Text("DNS: \(dns)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .padding(.leading, 28)
-                    }
+                )) {
+                    Label(service.name, systemImage: NetworkManager.isWiFiService(service.name) ? "wifi" : "cable.connector")
                 }
+                .toggleStyle(.switch)
             }
 
             Divider()
@@ -39,6 +30,10 @@ struct ContentView: View {
                 Text("IP: \(manager.ipAddress)")
                 Text("Gateway: \(manager.gateway)")
                 Text("Connected: \(manager.connectionInfo)")
+                if let active = manager.services.first(where: { $0.enabled && !NetworkManager.isVPNService($0.name) }),
+                   let dns = manager.currentDNS[active.name] {
+                    Text("DNS (\(active.name)): \(dns)")
+                }
             }
             .font(.caption)
             .textSelection(.enabled)
@@ -62,8 +57,6 @@ struct ContentView: View {
                         .help("Один раз спросит пароль, дальше Apply без промптов")
                         .frame(maxWidth: .infinity)
                 }
-                Button("Quit") { NSApplication.shared.terminate(nil) }
-                    .frame(maxWidth: .infinity)
                 if manager.isApplying {
                     HStack {
                         Spacer()
