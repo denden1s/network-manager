@@ -61,6 +61,7 @@ struct NetworkStatus {
 final class NetworkManager: ObservableObject {
     static let networksetup = "/usr/sbin/networksetup"
     static let osascript = "/usr/bin/osascript"
+    static let airportCLI = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
 
     @Published var currentLocation: String = "…"
     @Published var wifiDevice: String = "en0"
@@ -135,6 +136,44 @@ final class NetworkManager: ObservableObject {
     /// Экранирование аргумента для sh (имена сервисов могут содержать пробелы).
     static func shellQuote(_ value: String) -> String {
         return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Фоновый скан Wi-Fi сетей (`airport -s`). Best-effort: при любой ошибке
+    /// возвращает [] и НЕ валит apply. Требует включённый радиомодуль,
+    /// иначе список пуст. Deprecation-warning `airport` уходит в stderr и игнорируется.
+    func scanWiFi() -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.airportCLI)
+        process.arguments = ["-s"]
+        let outPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+        } catch {
+            return []
+        }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return [] }
+        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        // SSID может содержать пробелы, поэтому режем строку по BSSID (MAC),
+        // а не по пробелам. Строка-заголовок ("SSID BSSID ...") MAC не содержит и пропускается.
+        guard let macRegex = try? NSRegularExpression(pattern: "([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}") else { return [] }
+        var seen = Set<String>()
+        var result: [String] = []
+        for rawLine in out.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { continue }
+            let range = NSRange(line.startIndex..<line.endIndex, in: line)
+            guard let match = macRegex.firstMatch(in: line, range: range),
+                  let macRange = Range(match.range, in: line) else { continue }
+            let ssid = String(line[..<macRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+            if !ssid.isEmpty, !seen.contains(ssid) {
+                seen.insert(ssid)
+                result.append(ssid)
+            }
+        }
+        return result
     }
 
     // MARK: - Getters (без привилегий)
@@ -328,7 +367,9 @@ final class NetworkManager: ObservableObject {
                     try self.flushDNS()
                 }
                 if wifiOn {
-                    summary = "Applied: \(profile.locationName) + Wi-Fi ON (\(device)), DNS \(profile.wifiDNS) → \(dnsTargets.joined(separator: ", "))"
+                    // Режим поиска: обновляем список сетей для Control Center (best-effort).
+                    let scanned = self.scanWiFi().count
+                    summary = "Applied: \(profile.locationName) + Wi-Fi ON (\(device)), DNS \(profile.wifiDNS) → \(dnsTargets.joined(separator: ", ")), scan: \(scanned) nearby"
                 } else {
                     summary = "Applied: \(profile.locationName) + Wi-Fi OFF (\(device))"
                 }
@@ -370,7 +411,14 @@ final class NetworkManager: ObservableObject {
                         actual: actualPower ? "On" : "Off"
                     )
                 }
-                summary = "Wi-Fi \(on ? "ON" : "OFF") (\(device))"
+                if on {
+                    // Режим поиска: радиомодуль уже включён — обновляем список сетей,
+                    // чтобы их было видно в Control Center. Best-effort, ошибки игнорим.
+                    let found = self.scanWiFi()
+                    summary = "Wi-Fi ON (\(device)), scan: \(found.count) network(s) nearby"
+                } else {
+                    summary = "Wi-Fi OFF (\(device))"
+                }
             } catch {
                 failure = error.localizedDescription
             }
