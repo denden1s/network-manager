@@ -346,4 +346,43 @@ final class NetworkManager: ObservableObject {
             }
         }
     }
+
+    /// Только вкл/выкл питания Wi-Fi — без Location и DNS.
+    /// Используется тогглом Wi-Fi в поповере.
+    func applyWiFiOnly(on: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            self?.isApplying = true
+            self?.lastError = nil
+            self?.lastSummary = nil
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            var failure: String?
+            var summary: String?
+            do {
+                let device = (try? self.detectWiFiDevice()) ?? "en0"
+                try self.setWiFiPower(device: device, on: on)
+                let actualPower = try self.getWiFiPower(device: device)
+                guard actualPower == on else {
+                    throw NetworkManagerError.verificationFailed(
+                        step: "set Wi-Fi power \(on ? "on" : "off") (\(device))",
+                        expected: on ? "On" : "Off",
+                        actual: actualPower ? "On" : "Off"
+                    )
+                }
+                summary = "Wi-Fi \(on ? "ON" : "OFF") (\(device))"
+            } catch {
+                failure = error.localizedDescription
+            }
+            let capturedFailure = failure
+            let capturedSummary = summary
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.isApplying = false
+                self.lastError = capturedFailure
+                self.lastSummary = capturedSummary
+                self.refresh()
+            }
+        }
+    }
 }

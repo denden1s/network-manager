@@ -25,18 +25,16 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
 
-            // Toggle 2 — Wi-Fi ON/OFF (авто-применение при смене).
+            // Toggle 2 — только вкл/выкл питания Wi-Fi (без Location и DNS).
             Toggle("Wi-Fi", isOn: Binding(
                 get: { wifiOn },
                 set: { newValue in
                     wifiOn = newValue
-                    apply()
+                    manager.applyWiFiOnly(on: newValue)
                 }
             ))
             .toggleStyle(.switch)
-            .help(wifiOn
-                ? "Wi-Fi включён: Location + Wi-Fi + DNS профиля"
-                : "Wi-Fi выключен: активен Ethernet через текущий Location")
+            .help("Только включает/выключает Wi-Fi")
 
             Divider()
 
@@ -86,6 +84,7 @@ struct ContentView: View {
         .onAppear {
             manager.refresh()
         }
+        .onReceive(manager.$wifiPowerOn) { wifiOn = $0 }
     }
 
     private func apply() {
