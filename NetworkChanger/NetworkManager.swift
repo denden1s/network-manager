@@ -8,11 +8,11 @@ enum NetworkProfile: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// Имя macOS Network Location для проводной части.
-    var locationName: String {
+    /// Имя проводной сетевой службы (networkservice).
+    var ethernetServiceName: String {
         switch self {
-        case .work: return "ethernet_work"
-        case .home: return "ethernet_home"
+        case .work: return "ethernet-work"
+        case .home: return "ethernet-home"
         }
     }
 
@@ -29,6 +29,7 @@ enum NetworkManagerError: LocalizedError {
     case commandFailed(command: String, exitCode: Int32, output: String)
     case cancelledByUser
     case locationNotFound(name: String)
+    case serviceNotFound(name: String, available: [String])
     case verificationFailed(step: String, expected: String, actual: String)
 
     var errorDescription: String? {
@@ -39,6 +40,8 @@ enum NetworkManagerError: LocalizedError {
             return "Cancelled (administrator password was not entered)."
         case .locationNotFound(let name):
             return "Location '\(name)' not found. Create it in System Settings → Network → Locations."
+        case .serviceNotFound(let name, let available):
+            return "Service '\(name)' not found. Available: \(available.joined(separator: ", "))"
         case .verificationFailed(let step, let expected, let actual):
             return "Verification failed after '\(step)': expected '\(expected)', got '\(actual)'."
         }
@@ -52,6 +55,7 @@ struct NetworkStatus {
     var wifiPowerOn: Bool = false
     var wifiServices: [String] = []
     var dnsByService: [String: String] = [:]
+    var connectionInfo: String = "unknown"
 }
 
 /// Обёртка над `/usr/sbin/networksetup`.
@@ -71,6 +75,8 @@ final class NetworkManager: ObservableObject {
     @Published var isApplying: Bool = false
     @Published var lastError: String?
     @Published var lastSummary: String?
+    @Published var lastScan: [String] = []
+    @Published var connectionInfo: String = "unknown"
 
     // MARK: - Low-level execution
 
@@ -220,15 +226,16 @@ final class NetworkManager: ObservableObject {
         return out.localizedCaseInsensitiveContains(": On")
     }
 
-    /// Все включённые сервисы из `networksetup -listallnetworkservices`
-    /// (строки с `*` — отключённые, пропускаем).
+    /// Все сервисы из `networksetup -listallnetworkservices`,
+    /// ВКЛЮЧАЯ отключённые (строки с `*` — префикс снимаем, сервис сохраняем).
     func getAllServices() throws -> [String] {
         let out = try run(["-listallnetworkservices"])
         var result: [String] = []
         for rawLine in out.components(separatedBy: "\n") {
             var line = rawLine.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("*") { continue } // отключённый сервис
-            line = line.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("*") {
+                line = String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
+            }
             if line.isEmpty { continue }
             if line.hasPrefix("An asterisk") { continue } // пояснение networksetup
             result.append(line)
@@ -249,11 +256,65 @@ final class NetworkManager: ObservableObject {
         return try run(["-getdnsservers", service])
     }
 
+    /// `networksetup -getnetworkserviceenabled <service>` -> true = Enabled.
+    /// Вывод вида "Enabled" / "Disabled".
+    func getServiceEnabled(_ service: String) throws -> Bool {
+        let out = try run(["-getnetworkserviceenabled", service])
+        let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.localizedCaseInsensitiveContains("Disabled") { return false }
+        return trimmed.localizedCaseInsensitiveContains("Enabled")
+    }
+
+    /// Какая из двух ethernet-служб сейчас активна (enabled).
+    func getActiveEthernetService() throws -> String {
+        let workOn = try getServiceEnabled(NetworkProfile.work.ethernetServiceName)
+        let homeOn = try getServiceEnabled(NetworkProfile.home.ethernetServiceName)
+        switch (workOn, homeOn) {
+        case (true, false): return NetworkProfile.work.ethernetServiceName
+        case (false, true): return NetworkProfile.home.ethernetServiceName
+        case (true, true): return "both enabled"
+        case (false, false): return "none enabled"
+        }
+    }
+
+    /// Сводка подключения БЕЗ привилегий, НЕ бросает (внутри try? + fallback "unknown"):
+    /// SSID через `networksetup -getairportnetwork <device>` (сырой вывод как есть)
+    /// + IP через `networksetup -getinfo <первый wifi-сервис>` (строка "IP address:").
+    func getConnectionSummary() -> String {
+        var ssid = "unknown"
+        var ip = "unknown"
+        let device = (try? detectWiFiDevice()) ?? "en0"
+        if let out = try? run(["-getairportnetwork", device]) {
+            let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { ssid = trimmed }
+        }
+        if let service = (try? getWiFiServices())?.first,
+           let info = try? run(["-getinfo", service]) {
+            for rawLine in info.components(separatedBy: "\n") {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                if line.hasPrefix("IP address:") {
+                    let value = line
+                        .replacingOccurrences(of: "IP address:", with: "")
+                        .trimmingCharacters(in: .whitespaces)
+                    if !value.isEmpty { ip = value }
+                    break
+                }
+            }
+        }
+        return "\(ssid), IP \(ip)"
+    }
+
     // MARK: - Setters (с привилегиями, через системный prompt)
 
     /// `networksetup -switchtolocation <location>` (sudo).
     func switchLocation(_ location: String) throws {
         try runPrivileged("\(Self.networksetup) -switchtolocation \(Self.shellQuote(location))")
+    }
+
+    /// `networksetup -setnetworkserviceenabled <service> on|off` (sudo).
+    func setServiceEnabled(_ service: String, enabled: Bool) throws {
+        let state = enabled ? "on" : "off"
+        try runPrivileged("\(Self.networksetup) -setnetworkserviceenabled \(Self.shellQuote(service)) \(state)")
     }
 
     /// `networksetup -setairportpower <device> on|off` (sudo).
@@ -283,12 +344,13 @@ final class NetworkManager: ObservableObject {
             var failure: String?
             do {
                 status.wifiDevice = try self.detectWiFiDevice()
-                status.location = try self.getCurrentLocation()
+                status.location = try self.getActiveEthernetService()
                 status.wifiPowerOn = try self.getWiFiPower(device: status.wifiDevice)
                 status.wifiServices = try self.getWiFiServices()
                 for service in status.wifiServices {
                     status.dnsByService[service] = (try? self.getDNS(service: service)) ?? "?"
                 }
+                status.connectionInfo = self.getConnectionSummary()
             } catch {
                 failure = error.localizedDescription
             }
@@ -301,15 +363,16 @@ final class NetworkManager: ObservableObject {
                 self.wifiPowerOn = capturedStatus.wifiPowerOn
                 self.wifiServices = capturedStatus.wifiServices
                 self.currentDNS = capturedStatus.dnsByService
+                self.connectionInfo = capturedStatus.connectionInfo
                 self.lastError = capturedFailure
             }
         }
     }
 
     /// Применить комбинацию профиль + Wi-Fi:
-    /// - Work + WiFi ON:  switchtolocation ethernet_work + power on + DNS 192.168.105.11 на все Wi-Fi сервисы
-    /// - Home + WiFi ON:  switchtolocation ethernet_home + power on + DNS 8.8.8.8 на все Wi-Fi сервисы
-    /// - WiFi OFF (любой): power off + switchtolocation соответствующего Location
+    /// - Work + WiFi ON:  enable ethernet-work / disable ethernet-home + power on + DNS 192.168.105.11 на все Wi-Fi сервисы
+    /// - Home + WiFi ON:  enable ethernet-home / disable ethernet-work + power on + DNS 8.8.8.8 на все Wi-Fi сервисы
+    /// - WiFi OFF (любой): power off + переключение ethernet-служб
     func apply(profile: NetworkProfile, wifiOn: Bool) {
         DispatchQueue.main.async { [weak self] in
             self?.isApplying = true
@@ -320,22 +383,37 @@ final class NetworkManager: ObservableObject {
             guard let self = self else { return }
             var failure: String?
             var summary: String?
+            var scan: [String] = []
             do {
-                // 0. Проверка существования Location ДО switch — иначе молча ничего не произойдёт.
-                let locations = try self.listLocations()
-                guard locations.contains(profile.locationName) else {
-                    throw NetworkManagerError.locationNotFound(name: profile.locationName)
+                // 0. Проверка существования служб ДО переключения.
+                let mine = profile.ethernetServiceName
+                let other = (profile == .work ? NetworkProfile.home : NetworkProfile.work).ethernetServiceName
+                let services = try self.getAllServices()
+                guard services.contains(mine) else {
+                    throw NetworkManagerError.serviceNotFound(name: mine, available: services)
                 }
-                // 1. Проводная часть: Location переключаем всегда + верификация.
-                try self.switchLocation(profile.locationName)
-                // Применение Location не мгновенное — даём системе время.
+                guard services.contains(other) else {
+                    throw NetworkManagerError.serviceNotFound(name: other, available: services)
+                }
+                // 1. Проводная часть: свою службу включаем, чужую выключаем + верификация обеих.
+                try self.setServiceEnabled(mine, enabled: true)
+                try self.setServiceEnabled(other, enabled: false)
+                // Применение не мгновенное — даём системе время.
                 Thread.sleep(forTimeInterval: 0.5)
-                let actualLocation = try self.getCurrentLocation()
-                guard actualLocation == profile.locationName else {
+                let mineOn = try self.getServiceEnabled(mine)
+                guard mineOn else {
                     throw NetworkManagerError.verificationFailed(
-                        step: "switch location",
-                        expected: profile.locationName,
-                        actual: actualLocation
+                        step: "enable service '\(mine)'",
+                        expected: "Enabled",
+                        actual: "Disabled"
+                    )
+                }
+                let otherOn = try self.getServiceEnabled(other)
+                guard !otherOn else {
+                    throw NetworkManagerError.verificationFailed(
+                        step: "disable service '\(other)'",
+                        expected: "Disabled",
+                        actual: "Enabled"
                     )
                 }
                 // 2. Питание Wi-Fi + верификация.
@@ -368,27 +446,30 @@ final class NetworkManager: ObservableObject {
                 }
                 if wifiOn {
                     // Режим поиска: обновляем список сетей для Control Center (best-effort).
-                    let scanned = self.scanWiFi().count
-                    summary = "Applied: \(profile.locationName) + Wi-Fi ON (\(device)), DNS \(profile.wifiDNS) → \(dnsTargets.joined(separator: ", ")), scan: \(scanned) nearby"
+                    scan = self.scanWiFi()
+                    summary = "Applied: \(mine) + Wi-Fi ON (\(device)), DNS \(profile.wifiDNS) → \(dnsTargets.joined(separator: ", ")), scan: \(scan.count) nearby"
                 } else {
-                    summary = "Applied: \(profile.locationName) + Wi-Fi OFF (\(device))"
+                    scan = self.scanWiFi()
+                    summary = "Applied: \(mine) + Wi-Fi OFF (\(device))"
                 }
             } catch {
                 failure = error.localizedDescription
             }
             let capturedFailure = failure
             let capturedSummary = summary
+            let capturedScan = scan
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.isApplying = false
                 self.lastError = capturedFailure
                 self.lastSummary = capturedSummary
+                self.lastScan = capturedScan
                 self.refresh()
             }
         }
     }
 
-    /// Только вкл/выкл питания Wi-Fi — без Location и DNS.
+    /// Только вкл/выкл питания Wi-Fi — без ethernet-служб и DNS.
     /// Используется тогглом Wi-Fi в поповере.
     func applyWiFiOnly(on: Bool) {
         DispatchQueue.main.async { [weak self] in
@@ -400,6 +481,7 @@ final class NetworkManager: ObservableObject {
             guard let self = self else { return }
             var failure: String?
             var summary: String?
+            var scan: [String] = []
             do {
                 let device = (try? self.detectWiFiDevice()) ?? "en0"
                 try self.setWiFiPower(device: device, on: on)
@@ -414,9 +496,10 @@ final class NetworkManager: ObservableObject {
                 if on {
                     // Режим поиска: радиомодуль уже включён — обновляем список сетей,
                     // чтобы их было видно в Control Center. Best-effort, ошибки игнорим.
-                    let found = self.scanWiFi()
-                    summary = "Wi-Fi ON (\(device)), scan: \(found.count) network(s) nearby"
+                    scan = self.scanWiFi()
+                    summary = "Wi-Fi ON (\(device)), scan: \(scan.count) network(s) nearby"
                 } else {
+                    scan = self.scanWiFi()
                     summary = "Wi-Fi OFF (\(device))"
                 }
             } catch {
@@ -424,11 +507,13 @@ final class NetworkManager: ObservableObject {
             }
             let capturedFailure = failure
             let capturedSummary = summary
+            let capturedScan = scan
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.isApplying = false
                 self.lastError = capturedFailure
                 self.lastSummary = capturedSummary
+                self.lastScan = capturedScan
                 self.refresh()
             }
         }

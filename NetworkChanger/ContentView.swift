@@ -49,6 +49,12 @@ struct ContentView: View {
                         Text("DNS \(service): \(manager.currentDNS[service] ?? "?")")
                     }
                 }
+                Text("Connected: \(manager.connectionInfo)")
+                if manager.lastScan.isEmpty {
+                    Text("Nearby: 0")
+                } else {
+                    Text("Nearby: \(manager.lastScan.count) (\(manager.lastScan.joined(separator: ", ")))")
+                }
             }
             .font(.caption)
             .textSelection(.enabled)
@@ -78,6 +84,10 @@ struct ContentView: View {
                         .scaleEffect(0.6)
                 }
             }
+            HStack {
+                Button("Copy Diagnostics") { copyDiagnostics() }
+                Spacer()
+            }
         }
         .padding()
         .frame(width: 320)
@@ -89,5 +99,28 @@ struct ContentView: View {
 
     private func apply() {
         manager.apply(profile: profile, wifiOn: wifiOn)
+    }
+
+    private func copyDiagnostics() {
+        var lines: [String] = []
+        lines.append("Service: \(manager.currentLocation)")
+        lines.append("Wi-Fi (\(manager.wifiDevice)): \(manager.wifiPowerOn ? "ON" : "OFF")")
+        lines.append("Connected: \(manager.connectionInfo)")
+        if manager.wifiServices.isEmpty {
+            lines.append("Wi-Fi services: none found")
+        } else {
+            for service in manager.wifiServices {
+                lines.append("DNS \(service): \(manager.currentDNS[service] ?? "?")")
+            }
+        }
+        if manager.lastScan.isEmpty {
+            lines.append("Nearby: 0")
+        } else {
+            lines.append("Nearby: \(manager.lastScan.count) (\(manager.lastScan.joined(separator: ", ")))")
+        }
+        lines.append("Error: \(manager.lastError ?? "none")")
+        lines.append("Summary: \(manager.lastSummary ?? "none")")
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
     }
 }
