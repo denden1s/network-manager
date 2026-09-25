@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Окно-поповер из menu-bar иконки: два Toggle + статус + Apply.
 struct ContentView: View {
-    @StateObject private var manager = NetworkManager()
+    @ObservedObject var manager: NetworkManager
     @State private var profile: NetworkProfile = .work
     @State private var wifiOn: Bool = true
 
