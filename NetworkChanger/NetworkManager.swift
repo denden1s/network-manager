@@ -309,6 +309,12 @@ final class NetworkManager: ObservableObject {
             || name.localizedCaseInsensitiveContains("airport")
     }
 
+    /// VPN служба? Эвристика: имя содержит "vpn" (case-insensitive).
+    /// VPN-службы эксклюзивным правилом никогда не затрагиваются.
+    static func isVPNService(_ name: String) -> Bool {
+        name.localizedCaseInsensitiveContains("vpn")
+    }
+
     /// Подмножество сервисов, являющихся Wi-Fi.
     func getWiFiServices() throws -> [String] {
         return try getAllServices().filter { Self.isWiFiService($0) }
@@ -529,7 +535,7 @@ final class NetworkManager: ObservableObject {
                     let enabled = (try? self.getServiceEnabled(name)) ?? false
                     serviceStates.append(ServiceState(name: name, enabled: enabled))
                 }
-                for service in status.wifiServices {
+                for service in allServices {
                     status.dnsByService[service] = (try? self.getDNS(service: service)) ?? "?"
                 }
                 status.connectionInfo = self.getConnectionSummary()
@@ -567,8 +573,12 @@ final class NetworkManager: ObservableObject {
     }
 
     /// Вкл/выкл одной сетевой службы (фон, как остальные apply).
-    /// Wi-Fi службы — особый случай: дополнительно питание радиомодуля
-    /// (`setWiFiPower` + verify), при включении — фоновый `scanWiFi()`
+    /// Эксклюзивность: в один момент активна только одна не-VPN служба —
+    /// при ВКЛЮЧЕНИИ не-VPN службы все остальные не-VPN гасятся
+    /// (каждая через `setServiceEnabled(..., false)`), VPN остаются как есть.
+    /// При включении VPN и при ВЫКЛЮЧЕНИИ любой службы — только она сама.
+    /// Wi-Fi службы — особый случай поверх эксклюзивности: дополнительно питание
+    /// радиомодуля (`setWiFiPower` + verify), при включении — фоновый `scanWiFi()`
     /// (режим поиска для Control Center). Не-Wi-Fi службы — только enable/disable.
     /// Ошибки → `lastError`, успех → `lastSummary` ("Service 'X' ON/OFF"), в конце `refresh()`.
     func setService(name: String, enabled: Bool) {
@@ -582,12 +592,24 @@ final class NetworkManager: ObservableObject {
             var failure: String?
             var summary: String?
             do {
+                let isVPN = Self.isVPNService(name)
                 let isWiFi = Self.isWiFiService(name)
                 let device = (try? self.detectWiFiDevice()) ?? "en0"
-                // 1. Сама служба + верификация.
+                // 1. Сама служба.
                 try self.setServiceEnabled(name, enabled: enabled)
+                // 2. Эксклюзивность: включаем не-VPN — гасим все остальные не-VPN.
+                var exclusiveOthers: [String] = []
+                if enabled && !isVPN {
+                    for other in try self.getAllServices()
+                            where other != name && !Self.isVPNService(other) {
+                        try self.setServiceEnabled(other, enabled: false)
+                        exclusiveOthers.append(other)
+                    }
+                }
                 // Применение не мгновенное — даём системе время.
                 Thread.sleep(forTimeInterval: 0.5)
+                // 3. Верификация: включённая — on, остальные не-VPN — off.
+                // VPN в verify не проверяем никогда.
                 let actual = try self.getServiceEnabled(name)
                 guard actual == enabled else {
                     throw NetworkManagerError.verificationFailed(
@@ -596,7 +618,17 @@ final class NetworkManager: ObservableObject {
                         actual: actual ? "Enabled" : "Disabled"
                     )
                 }
-                // 2. Wi-Fi: питание радиомодуля + verify; при включении — фоновый скан.
+                for other in exclusiveOthers {
+                    let otherOn = try self.getServiceEnabled(other)
+                    guard !otherOn else {
+                        throw NetworkManagerError.verificationFailed(
+                            step: "disable service '\(other)' (exclusive)",
+                            expected: "Disabled",
+                            actual: "Enabled"
+                        )
+                    }
+                }
+                // 4. Wi-Fi: питание радиомодуля + verify; при включении — фоновый скан.
                 if isWiFi {
                     try self.setWiFiPower(device: device, on: enabled)
                     let actualPower = try self.getWiFiPower(device: device)
