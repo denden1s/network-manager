@@ -56,6 +56,8 @@ struct NetworkStatus {
     var wifiServices: [String] = []
     var dnsByService: [String: String] = [:]
     var connectionInfo: String = "unknown"
+    var ipAddress: String = "?"
+    var gateway: String = "?"
 }
 
 /// Обёртка над `/usr/sbin/networksetup`.
@@ -72,6 +74,7 @@ final class NetworkManager: ObservableObject {
     static let sudo = "/usr/bin/sudo"
     static let dscacheutil = "/usr/bin/dscacheutil"
     static let killall = "/usr/bin/killall"
+    static let route = "/sbin/route"
     static let airportCLI = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
 
     @Published var currentLocation: String = "…"
@@ -82,8 +85,9 @@ final class NetworkManager: ObservableObject {
     @Published var isApplying: Bool = false
     @Published var lastError: String?
     @Published var lastSummary: String?
-    @Published var lastScan: [String] = []
     @Published var connectionInfo: String = "unknown"
+    @Published var ipAddress: String = "?"
+    @Published var gateway: String = "?"
     @Published var passwordlessReady: Bool = false
 
     // MARK: - Low-level execution
@@ -329,6 +333,58 @@ final class NetworkManager: ObservableObject {
         return try run(["-getdnsservers", service])
     }
 
+    /// IP адрес сервиса через `networksetup -getinfo <service>` (строка "IP address:").
+    /// Best-effort: при любой ошибке или пустом значении возвращает "?".
+    func getIPAddress(service: String) -> String {
+        guard let info = try? run(["-getinfo", service]) else { return "?" }
+        for rawLine in info.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("IP address:") {
+                let value = line
+                    .replacingOccurrences(of: "IP address:", with: "")
+                    .trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty { return value }
+                break
+            }
+        }
+        return "?"
+    }
+
+    /// Шлюз по умолчанию: `route -n get default`, без sudo.
+    /// Парсим строку вида `gateway: 192.168.1.1` (второй токен).
+    func getDefaultGateway() throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.route)
+        process.arguments = ["-n", "get", "default"]
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        try process.run()
+        process.waitUntilExit()
+        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            throw NetworkManagerError.commandFailed(
+                command: "route -n get default",
+                exitCode: process.terminationStatus,
+                output: (out + "\n" + err).trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        for rawLine in out.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("gateway:") {
+                let tokens = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+                if tokens.count >= 2 { return tokens[1] }
+            }
+        }
+        throw NetworkManagerError.commandFailed(
+            command: "route -n get default",
+            exitCode: 0,
+            output: "gateway not found in output:\n\(out)"
+        )
+    }
+
     /// `networksetup -getnetworkserviceenabled <service>` -> true = Enabled.
     /// Вывод вида "Enabled" / "Disabled".
     func getServiceEnabled(_ service: String) throws -> Bool {
@@ -451,6 +507,16 @@ final class NetworkManager: ObservableObject {
                     status.dnsByService[service] = (try? self.getDNS(service: service)) ?? "?"
                 }
                 status.connectionInfo = self.getConnectionSummary()
+                // IP: Wi-Fi включён — первый Wi-Fi сервис, иначе активная ethernet-служба.
+                if status.wifiPowerOn, let wifiService = status.wifiServices.first {
+                    status.ipAddress = self.getIPAddress(service: wifiService)
+                } else if status.location == NetworkProfile.work.ethernetServiceName
+                            || status.location == NetworkProfile.home.ethernetServiceName {
+                    status.ipAddress = self.getIPAddress(service: status.location)
+                } else {
+                    status.ipAddress = "?"
+                }
+                status.gateway = (try? self.getDefaultGateway()) ?? "?"
             } catch {
                 failure = error.localizedDescription
             }
@@ -465,6 +531,8 @@ final class NetworkManager: ObservableObject {
                 self.wifiServices = capturedStatus.wifiServices
                 self.currentDNS = capturedStatus.dnsByService
                 self.connectionInfo = capturedStatus.connectionInfo
+                self.ipAddress = capturedStatus.ipAddress
+                self.gateway = capturedStatus.gateway
                 self.passwordlessReady = capturedPasswordless
                 self.lastError = capturedFailure
             }
@@ -559,13 +627,11 @@ final class NetworkManager: ObservableObject {
             }
             let capturedFailure = failure
             let capturedSummary = summary
-            let capturedScan = scan
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.isApplying = false
                 self.lastError = capturedFailure
                 self.lastSummary = capturedSummary
-                self.lastScan = capturedScan
                 self.refresh()
             }
         }
@@ -609,13 +675,11 @@ final class NetworkManager: ObservableObject {
             }
             let capturedFailure = failure
             let capturedSummary = summary
-            let capturedScan = scan
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.isApplying = false
                 self.lastError = capturedFailure
                 self.lastSummary = capturedSummary
-                self.lastScan = capturedScan
                 self.refresh()
             }
         }
