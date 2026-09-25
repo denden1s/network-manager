@@ -59,15 +59,19 @@ struct NetworkStatus {
 }
 
 /// Обёртка над `/usr/sbin/networksetup`.
-/// Все чтения выполняются напрямую, все изменения — через `runPrivileged`:
-/// сначала пробуем `sudo -n` без промпта (NOPASSWD-allowlist из
-/// scripts/install-passwordless-sudo.sh), при неудаче — fallback на
+/// Все чтения выполняются напрямую, все изменения — через `runPrivilegedBin`:
+/// сначала пробуем `sudo -n <бинарь> <args>` напрямую без shell
+/// (sudo матчит запускаемый бинарь — NOPASSWD-allowlist из
+/// scripts/install-passwordless-sudo.sh разрешает только прямые вызовы),
+/// при неудаче — fallback на
 /// `osascript -e 'do shell script "..." with administrator privileges'`
 /// (системный prompt пароля, без SMJobBless).
 final class NetworkManager: ObservableObject {
     static let networksetup = "/usr/sbin/networksetup"
     static let osascript = "/usr/bin/osascript"
     static let sudo = "/usr/bin/sudo"
+    static let dscacheutil = "/usr/bin/dscacheutil"
+    static let killall = "/usr/bin/killall"
     static let airportCLI = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
 
     @Published var currentLocation: String = "…"
@@ -108,18 +112,17 @@ final class NetworkManager: ObservableObject {
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Запуск произвольной shell-команды С привилегиями.
-    /// Путь 1 (без промпта): `sudo -n` — срабатывает, если установлен
-    /// NOPASSWD-allowlist (scripts/install-passwordless-sudo.sh).
-    /// Путь 2 (fallback): системный prompt через osascript
-    /// `do shell script "..." with administrator privileges` (код сохранён как есть).
-    /// Stderr попытки sudo -n виден только если упали ОБА пути (объединяем в ошибке).
+    /// Запуск привилегированной команды БЕЗ shell: `sudo -n <path> <args>` напрямую.
+    /// sudo матчит запускаемый бинарь, поэтому без `sh -c` (иначе видел бы `sh`
+    /// и allowlist не срабатывал). При exit 0 — вернуть stdout.
+    /// Иначе fallback: shell-строка из path+args (КАЖДЫЙ аргумент через `shellQuote`)
+    /// выполняется osascript-путём. Ошибка при падении обоих — stderr обеих попыток.
     @discardableResult
-    func runPrivileged(_ shellCommand: String) throws -> String {
-        // Путь 1: sudo -n без промпта.
+    func runPrivilegedBin(path: String, args: [String]) throws -> String {
+        // Путь 1: sudo -n напрямую, без shell.
         let sudoProcess = Process()
         sudoProcess.executableURL = URL(fileURLWithPath: Self.sudo)
-        sudoProcess.arguments = ["-n", "sh", "-c", shellCommand]
+        sudoProcess.arguments = ["-n", path] + args
         let sudoOutPipe = Pipe()
         let sudoErrPipe = Pipe()
         sudoProcess.standardOutput = sudoOutPipe
@@ -131,7 +134,31 @@ final class NetworkManager: ObservableObject {
         if sudoProcess.terminationStatus == 0 {
             return sudoOut.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        // Путь 2 (fallback): системный prompt — код сохранён как есть.
+        // Путь 2 (fallback): shell-строка + системный prompt.
+        let shellCommand = ([path] + args).map { Self.shellQuote($0) }.joined(separator: " ")
+        do {
+            return try runOsascriptPrivileged(shellCommand)
+        } catch NetworkManagerError.cancelledByUser {
+            throw NetworkManagerError.cancelledByUser
+        } catch {
+            guard let osaError = error as? NetworkManagerError,
+                  case .commandFailed(_, let exitCode, let output) = osaError else {
+                throw error
+            }
+            throw NetworkManagerError.commandFailed(
+                command: shellCommand,
+                exitCode: exitCode,
+                output: "sudo -n failed: \(sudoErr.trimmingCharacters(in: .whitespacesAndNewlines))\nosascript failed: \(output)"
+            )
+        }
+    }
+
+    /// Привилегированный запуск shell-команды через системный prompt (osascript
+    /// `do shell script "..." with administrator privileges`). Без попыток sudo.
+    /// Используется как fallback из `runPrivilegedBin` и напрямую из `installPasswordless`
+    /// (скрипт установки целиком требует shell — `sh` в allowlist нет и не нужен).
+    @discardableResult
+    func runOsascriptPrivileged(_ shellCommand: String) throws -> String {
         // Экранируем для двойных кавычек внутри AppleScript-строки.
         let escaped = shellCommand
             .replacingOccurrences(of: "\\", with: "\\\\")
@@ -158,7 +185,7 @@ final class NetworkManager: ObservableObject {
             throw NetworkManagerError.commandFailed(
                 command: shellCommand,
                 exitCode: status,
-                output: "sudo -n failed: \(sudoErr.trimmingCharacters(in: .whitespacesAndNewlines))\nosascript failed: \((out + "\n" + err).trimmingCharacters(in: .whitespacesAndNewlines))"
+                output: (out + "\n" + err).trimmingCharacters(in: .whitespacesAndNewlines)
             )
         }
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -354,35 +381,37 @@ final class NetworkManager: ObservableObject {
 
     /// `networksetup -switchtolocation <location>` (sudo).
     func switchLocation(_ location: String) throws {
-        try runPrivileged("\(Self.networksetup) -switchtolocation \(Self.shellQuote(location))")
+        try runPrivilegedBin(path: Self.networksetup, args: ["-switchtolocation", location])
     }
 
     /// `networksetup -setnetworkserviceenabled <service> on|off` (sudo).
     func setServiceEnabled(_ service: String, enabled: Bool) throws {
         let state = enabled ? "on" : "off"
-        try runPrivileged("\(Self.networksetup) -setnetworkserviceenabled \(Self.shellQuote(service)) \(state)")
+        try runPrivilegedBin(path: Self.networksetup, args: ["-setnetworkserviceenabled", service, state])
     }
 
     /// `networksetup -setairportpower <device> on|off` (sudo).
     func setWiFiPower(device: String, on: Bool) throws {
         let state = on ? "on" : "off"
-        try runPrivileged("\(Self.networksetup) -setairportpower \(device) \(state)")
+        try runPrivilegedBin(path: Self.networksetup, args: ["-setairportpower", device, state])
     }
 
     /// `networksetup -setdnsservers <service> <dns>` (sudo).
     func setDNS(service: String, dns: String) throws {
-        try runPrivileged("\(Self.networksetup) -setdnsservers \(Self.shellQuote(service)) \(dns)")
+        try runPrivilegedBin(path: Self.networksetup, args: ["-setdnsservers", service, dns])
     }
 
-    /// Сброс DNS-кэша после смены DNS (sudo):
-    /// `dscacheutil -flushcache; killall -HUP mDNSResponder`.
+    /// Сброс DNS-кэша после смены DNS (sudo): два прямых вызова без shell —
+    /// `dscacheutil -flushcache` и `killall -HUP mDNSResponder`.
     func flushDNS() throws {
-        try runPrivileged("/usr/bin/dscacheutil -flushcache; /usr/bin/killall -HUP mDNSResponder")
+        try runPrivilegedBin(path: Self.dscacheutil, args: ["-flushcache"])
+        try runPrivilegedBin(path: Self.killall, args: ["-HUP", "mDNSResponder"])
     }
 
     /// Установка passwordless sudoers-allowlist через scripts/install-passwordless-sudo.sh.
-    /// Запуск — через привилегированный путь (один системный промпт),
-    /// возвращает stdout скрипта или бросает commandFailed с его выводом.
+    /// Запуск — напрямую через osascript-привилегированный путь (один системный промпт),
+    /// БЕЗ попыток sudo -n (скрипт целиком требует shell — `sh` в allowlist нет и не нужен).
+    /// Возвращает stdout скрипта или бросает commandFailed с его выводом.
     /// Скрипт должен лежать в Resources бандла (см. README → Passwordless).
     @discardableResult
     func installPasswordless() throws -> String {
@@ -401,7 +430,7 @@ final class NetworkManager: ObservableObject {
                 output: "Script not found in app Resources. See README → Passwordless: add scripts/install-passwordless-sudo.sh to Copy Files → Resources."
             )
         }
-        return try runPrivileged("/bin/sh \(Self.shellQuote(scriptPath))")
+        return try runOsascriptPrivileged("/bin/sh \(Self.shellQuote(scriptPath))")
     }
 
     // MARK: - High-level logic
