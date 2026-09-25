@@ -1,46 +1,32 @@
 import SwiftUI
 import AppKit
 
-/// Окно-поповер из menu-bar иконки: два Toggle + статус + Quit.
+/// Окно-поповер из menu-bar иконки: тогглы всех служб + статус + Quit.
 struct ContentView: View {
     @ObservedObject var manager: NetworkManager
-    @State private var profile: NetworkProfile = .work
-    @State private var wifiOn: Bool = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Network Changer")
                 .font(.headline)
 
-            // Toggle 1 — профиль сети (авто-применение при смене).
-            Picker("Network", selection: Binding(
-                get: { profile },
-                set: { newValue in
-                    profile = newValue
-                    manager.apply(profile: newValue, wifiOn: wifiOn)
+            // Все сетевые службы системы, у каждой свой on/off тоггл.
+            ForEach(manager.services) { service in
+                Toggle(isOn: Binding(
+                    get: { service.enabled },
+                    set: { newValue in
+                        manager.setService(name: service.name, enabled: newValue)
+                    }
+                )) {
+                    Label(service.name, systemImage: NetworkManager.isWiFiService(service.name) ? "wifi" : "cable.connector")
                 }
-            )) {
-                Text("Work").tag(NetworkProfile.work)
-                Text("Home").tag(NetworkProfile.home)
+                .toggleStyle(.switch)
             }
-            .pickerStyle(.segmented)
-
-            // Toggle 2 — только вкл/выкл питания Wi-Fi (без Location и DNS).
-            Toggle("Wi-Fi", isOn: Binding(
-                get: { wifiOn },
-                set: { newValue in
-                    wifiOn = newValue
-                    manager.applyWiFiOnly(on: newValue)
-                }
-            ))
-            .toggleStyle(.switch)
-            .help("Только включает/выключает Wi-Fi")
 
             Divider()
 
             // Текущий статус системы.
             Group {
-                Text("Service: \(manager.currentLocation)")
                 Text("Wi-Fi (\(manager.wifiDevice)): \(manager.wifiPowerOn ? "ON" : "OFF")")
                 Text("IP: \(manager.ipAddress)")
                 Text("Gateway: \(manager.gateway)")
@@ -87,7 +73,6 @@ struct ContentView: View {
         .onAppear {
             manager.refresh()
         }
-        .onReceive(manager.$wifiPowerOn) { wifiOn = $0 }
     }
 
     private func enablePasswordless() {

@@ -1,28 +1,11 @@
 import Foundation
 import Combine
 
-/// Профиль сети: Work / Home.
-enum NetworkProfile: String, CaseIterable, Identifiable {
-    case work = "Work"
-    case home = "Home"
-
-    var id: String { rawValue }
-
-    /// Имя проводной сетевой службы (networkservice).
-    var ethernetServiceName: String {
-        switch self {
-        case .work: return "ethernet-work"
-        case .home: return "ethernet-home"
-        }
-    }
-
-    /// DNS, применяемый ко ВСЕМ Wi-Fi сервисам в этом профиле.
-    var wifiDNS: String {
-        switch self {
-        case .work: return "192.168.105.11"
-        case .home: return "8.8.8.8"
-        }
-    }
+/// Состояние одной сетевой службы для списка тогглов в поповере.
+struct ServiceState: Identifiable {
+    let name: String
+    var enabled: Bool
+    var id: String { name }
 }
 
 enum NetworkManagerError: LocalizedError {
@@ -50,7 +33,6 @@ enum NetworkManagerError: LocalizedError {
 
 /// Снапшот состояния, собираемый в фоне и публикуемый на main.
 struct NetworkStatus {
-    var location: String = "…"
     var wifiDevice: String = "en0"
     var wifiPowerOn: Bool = false
     var wifiServices: [String] = []
@@ -75,12 +57,13 @@ final class NetworkManager: ObservableObject {
     static let dscacheutil = "/usr/bin/dscacheutil"
     static let killall = "/usr/bin/killall"
     static let route = "/sbin/route"
+    static let netstat = "/usr/sbin/netstat"
     static let airportCLI = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
 
-    @Published var currentLocation: String = "…"
     @Published var wifiDevice: String = "en0"
     @Published var wifiPowerOn: Bool = false
     @Published var wifiServices: [String] = []
+    @Published var services: [ServiceState] = []
     @Published var currentDNS: [String: String] = [:]
     @Published var isApplying: Bool = false
     @Published var lastError: String?
@@ -320,12 +303,15 @@ final class NetworkManager: ObservableObject {
         return result
     }
 
-    /// Подмножество сервисов, являющихся Wi-Fi (имя содержит Wi-Fi / AirPort).
+    /// Wi-Fi служба? (имя содержит Wi-Fi / AirPort).
+    static func isWiFiService(_ name: String) -> Bool {
+        name.localizedCaseInsensitiveContains("wi-fi")
+            || name.localizedCaseInsensitiveContains("airport")
+    }
+
+    /// Подмножество сервисов, являющихся Wi-Fi.
     func getWiFiServices() throws -> [String] {
-        return try getAllServices().filter {
-            $0.localizedCaseInsensitiveContains("wi-fi")
-                || $0.localizedCaseInsensitiveContains("airport")
-        }
+        return try getAllServices().filter { Self.isWiFiService($0) }
     }
 
     /// `networksetup -getdnsservers <service>` (сырой вывод).
@@ -352,7 +338,16 @@ final class NetworkManager: ObservableObject {
 
     /// Шлюз по умолчанию: `route -n get default`, без sudo.
     /// Парсим строку вида `gateway: 192.168.1.1` (второй токен).
+    /// При активном VPN default route уходит в utun без поля gateway —
+    /// тогда fallback на `netstat -rn -f inet` (первый default с IP-шлюзом, не link#).
     func getDefaultGateway() throws -> String {
+        if let viaRoute = try? getGatewayViaRoute() {
+            return viaRoute
+        }
+        return try getGatewayViaNetstat()
+    }
+
+    private func getGatewayViaRoute() throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: Self.route)
         process.arguments = ["-n", "get", "default"]
@@ -385,6 +380,43 @@ final class NetworkManager: ObservableObject {
         )
     }
 
+    private func getGatewayViaNetstat() throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: Self.netstat)
+        process.arguments = ["-rn", "-f", "inet"]
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        try process.run()
+        process.waitUntilExit()
+        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        guard process.terminationStatus == 0 else {
+            throw NetworkManagerError.commandFailed(
+                command: "netstat -rn -f inet",
+                exitCode: process.terminationStatus,
+                output: (out + "\n" + err).trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        // Строки вида: "default  192.168.222.1  UGScIg  en6"
+        // Пропускаем VPN-заглушки вида "default  link#23  ...  utun6".
+        for rawLine in out.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("default") else { continue }
+            let tokens = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            guard tokens.count >= 2 else { continue }
+            let gateway = tokens[1]
+            if gateway.hasPrefix("link#") { continue }
+            if !gateway.isEmpty { return gateway }
+        }
+        throw NetworkManagerError.commandFailed(
+            command: "netstat -rn -f inet",
+            exitCode: 0,
+            output: "gateway not found in output:\n\(out)"
+        )
+    }
+
     /// `networksetup -getnetworkserviceenabled <service>` -> true = Enabled.
     /// Вывод вида "Enabled" / "Disabled".
     func getServiceEnabled(_ service: String) throws -> Bool {
@@ -392,18 +424,6 @@ final class NetworkManager: ObservableObject {
         let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.localizedCaseInsensitiveContains("Disabled") { return false }
         return trimmed.localizedCaseInsensitiveContains("Enabled")
-    }
-
-    /// Какая из двух ethernet-служб сейчас активна (enabled).
-    func getActiveEthernetService() throws -> String {
-        let workOn = try getServiceEnabled(NetworkProfile.work.ethernetServiceName)
-        let homeOn = try getServiceEnabled(NetworkProfile.home.ethernetServiceName)
-        switch (workOn, homeOn) {
-        case (true, false): return NetworkProfile.work.ethernetServiceName
-        case (false, true): return NetworkProfile.home.ethernetServiceName
-        case (true, true): return "both enabled"
-        case (false, false): return "none enabled"
-        }
     }
 
     /// Сводка подключения БЕЗ привилегий, НЕ бросает (внутри try? + fallback "unknown"):
@@ -496,23 +516,29 @@ final class NetworkManager: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             var status = NetworkStatus()
+            var serviceStates: [ServiceState] = []
             var failure: String?
             let passwordless = self.isPasswordless()
             do {
                 status.wifiDevice = try self.detectWiFiDevice()
-                status.location = try self.getActiveEthernetService()
                 status.wifiPowerOn = try self.getWiFiPower(device: status.wifiDevice)
-                status.wifiServices = try self.getWiFiServices()
+                let allServices = try self.getAllServices()
+                status.wifiServices = allServices.filter { Self.isWiFiService($0) }
+                for name in allServices {
+                    // Best-effort по каждой службе: ошибку чтения считаем Disabled.
+                    let enabled = (try? self.getServiceEnabled(name)) ?? false
+                    serviceStates.append(ServiceState(name: name, enabled: enabled))
+                }
                 for service in status.wifiServices {
                     status.dnsByService[service] = (try? self.getDNS(service: service)) ?? "?"
                 }
                 status.connectionInfo = self.getConnectionSummary()
-                // IP: Wi-Fi включён — первый Wi-Fi сервис, иначе активная ethernet-служба.
+                // IP: Wi-Fi включён — первый Wi-Fi сервис, иначе первая включённая
+                // не-Wi-Fi служба (активный Ethernet).
                 if status.wifiPowerOn, let wifiService = status.wifiServices.first {
                     status.ipAddress = self.getIPAddress(service: wifiService)
-                } else if status.location == NetworkProfile.work.ethernetServiceName
-                            || status.location == NetworkProfile.home.ethernetServiceName {
-                    status.ipAddress = self.getIPAddress(service: status.location)
+                } else if let eth = serviceStates.first(where: { $0.enabled && !Self.isWiFiService($0.name) }) {
+                    status.ipAddress = self.getIPAddress(service: eth.name)
                 } else {
                     status.ipAddress = "?"
                 }
@@ -521,14 +547,15 @@ final class NetworkManager: ObservableObject {
                 failure = error.localizedDescription
             }
             let capturedStatus = status
+            let capturedServices = serviceStates
             let capturedFailure = failure
             let capturedPasswordless = passwordless
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.wifiDevice = capturedStatus.wifiDevice
-                self.currentLocation = capturedStatus.location
                 self.wifiPowerOn = capturedStatus.wifiPowerOn
                 self.wifiServices = capturedStatus.wifiServices
+                self.services = capturedServices
                 self.currentDNS = capturedStatus.dnsByService
                 self.connectionInfo = capturedStatus.connectionInfo
                 self.ipAddress = capturedStatus.ipAddress
@@ -539,11 +566,12 @@ final class NetworkManager: ObservableObject {
         }
     }
 
-    /// Применить комбинацию профиль + Wi-Fi:
-    /// - Work + WiFi ON:  enable ethernet-work / disable ethernet-home + power on + DNS 192.168.105.11 на все Wi-Fi сервисы
-    /// - Home + WiFi ON:  enable ethernet-home / disable ethernet-work + power on + DNS 8.8.8.8 на все Wi-Fi сервисы
-    /// - WiFi OFF (любой): power off + переключение ethernet-служб
-    func apply(profile: NetworkProfile, wifiOn: Bool) {
+    /// Вкл/выкл одной сетевой службы (фон, как остальные apply).
+    /// Wi-Fi службы — особый случай: дополнительно питание радиомодуля
+    /// (`setWiFiPower` + verify), при включении — фоновый `scanWiFi()`
+    /// (режим поиска для Control Center). Не-Wi-Fi службы — только enable/disable.
+    /// Ошибки → `lastError`, успех → `lastSummary` ("Service 'X' ON/OFF"), в конце `refresh()`.
+    func setService(name: String, enabled: Bool) {
         DispatchQueue.main.async { [weak self] in
             self?.isApplying = true
             self?.lastError = nil
@@ -553,123 +581,38 @@ final class NetworkManager: ObservableObject {
             guard let self = self else { return }
             var failure: String?
             var summary: String?
-            var scan: [String] = []
             do {
-                // 0. Проверка существования служб ДО переключения.
-                let mine = profile.ethernetServiceName
-                let other = (profile == .work ? NetworkProfile.home : NetworkProfile.work).ethernetServiceName
-                let services = try self.getAllServices()
-                guard services.contains(mine) else {
-                    throw NetworkManagerError.serviceNotFound(name: mine, available: services)
-                }
-                guard services.contains(other) else {
-                    throw NetworkManagerError.serviceNotFound(name: other, available: services)
-                }
-                // 1. Проводная часть: свою службу включаем, чужую выключаем + верификация обеих.
-                try self.setServiceEnabled(mine, enabled: true)
-                try self.setServiceEnabled(other, enabled: false)
+                let isWiFi = Self.isWiFiService(name)
+                let device = (try? self.detectWiFiDevice()) ?? "en0"
+                // 1. Сама служба + верификация.
+                try self.setServiceEnabled(name, enabled: enabled)
                 // Применение не мгновенное — даём системе время.
                 Thread.sleep(forTimeInterval: 0.5)
-                let mineOn = try self.getServiceEnabled(mine)
-                guard mineOn else {
+                let actual = try self.getServiceEnabled(name)
+                guard actual == enabled else {
                     throw NetworkManagerError.verificationFailed(
-                        step: "enable service '\(mine)'",
-                        expected: "Enabled",
-                        actual: "Disabled"
+                        step: "\(enabled ? "enable" : "disable") service '\(name)'",
+                        expected: enabled ? "Enabled" : "Disabled",
+                        actual: actual ? "Enabled" : "Disabled"
                     )
                 }
-                let otherOn = try self.getServiceEnabled(other)
-                guard !otherOn else {
-                    throw NetworkManagerError.verificationFailed(
-                        step: "disable service '\(other)'",
-                        expected: "Disabled",
-                        actual: "Enabled"
-                    )
-                }
-                // 2. Питание Wi-Fi + верификация.
-                let device = (try? self.detectWiFiDevice()) ?? "en0"
-                try self.setWiFiPower(device: device, on: wifiOn)
-                let actualPower = try self.getWiFiPower(device: device)
-                guard actualPower == wifiOn else {
-                    throw NetworkManagerError.verificationFailed(
-                        step: "set Wi-Fi power \(wifiOn ? "on" : "off") (\(device))",
-                        expected: wifiOn ? "On" : "Off",
-                        actual: actualPower ? "On" : "Off"
-                    )
-                }
-                // 3. DNS — только когда Wi-Fi включён, на ВСЕ Wi-Fi сервисы + верификация + flush.
-                var dnsTargets: [String] = []
-                if wifiOn {
-                    for service in try self.getWiFiServices() {
-                        try self.setDNS(service: service, dns: profile.wifiDNS)
-                        let actualDNS = (try? self.getDNS(service: service)) ?? "?"
-                        guard actualDNS.contains(profile.wifiDNS) else {
-                            throw NetworkManagerError.verificationFailed(
-                                step: "set DNS on '\(service)'",
-                                expected: profile.wifiDNS,
-                                actual: actualDNS
-                            )
-                        }
-                        dnsTargets.append(service)
+                // 2. Wi-Fi: питание радиомодуля + verify; при включении — фоновый скан.
+                if isWiFi {
+                    try self.setWiFiPower(device: device, on: enabled)
+                    let actualPower = try self.getWiFiPower(device: device)
+                    guard actualPower == enabled else {
+                        throw NetworkManagerError.verificationFailed(
+                            step: "set Wi-Fi power \(enabled ? "on" : "off") (\(device))",
+                            expected: enabled ? "On" : "Off",
+                            actual: actualPower ? "On" : "Off"
+                        )
                     }
-                    try self.flushDNS()
+                    if enabled {
+                        // Режим поиска: обновляем список сетей для Control Center (best-effort).
+                        _ = self.scanWiFi()
+                    }
                 }
-                if wifiOn {
-                    // Режим поиска: обновляем список сетей для Control Center (best-effort).
-                    scan = self.scanWiFi()
-                    summary = "Applied: \(mine) + Wi-Fi ON (\(device)), DNS \(profile.wifiDNS) → \(dnsTargets.joined(separator: ", ")), scan: \(scan.count) nearby"
-                } else {
-                    scan = self.scanWiFi()
-                    summary = "Applied: \(mine) + Wi-Fi OFF (\(device))"
-                }
-            } catch {
-                failure = error.localizedDescription
-            }
-            let capturedFailure = failure
-            let capturedSummary = summary
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                self.isApplying = false
-                self.lastError = capturedFailure
-                self.lastSummary = capturedSummary
-                self.refresh()
-            }
-        }
-    }
-
-    /// Только вкл/выкл питания Wi-Fi — без ethernet-служб и DNS.
-    /// Используется тогглом Wi-Fi в поповере.
-    func applyWiFiOnly(on: Bool) {
-        DispatchQueue.main.async { [weak self] in
-            self?.isApplying = true
-            self?.lastError = nil
-            self?.lastSummary = nil
-        }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-            var failure: String?
-            var summary: String?
-            var scan: [String] = []
-            do {
-                let device = (try? self.detectWiFiDevice()) ?? "en0"
-                try self.setWiFiPower(device: device, on: on)
-                let actualPower = try self.getWiFiPower(device: device)
-                guard actualPower == on else {
-                    throw NetworkManagerError.verificationFailed(
-                        step: "set Wi-Fi power \(on ? "on" : "off") (\(device))",
-                        expected: on ? "On" : "Off",
-                        actual: actualPower ? "On" : "Off"
-                    )
-                }
-                if on {
-                    // Режим поиска: радиомодуль уже включён — обновляем список сетей,
-                    // чтобы их было видно в Control Center. Best-effort, ошибки игнорим.
-                    scan = self.scanWiFi()
-                    summary = "Wi-Fi ON (\(device)), scan: \(scan.count) network(s) nearby"
-                } else {
-                    scan = self.scanWiFi()
-                    summary = "Wi-Fi OFF (\(device))"
-                }
+                summary = "Service '\(name)' \(enabled ? "ON" : "OFF")"
             } catch {
                 failure = error.localizedDescription
             }
