@@ -26,15 +26,21 @@ enum NetworkProfile: String, CaseIterable, Identifiable {
 }
 
 enum NetworkManagerError: LocalizedError {
-    case commandFailed(command: String, output: String)
+    case commandFailed(command: String, exitCode: Int32, output: String)
     case cancelledByUser
+    case locationNotFound(name: String)
+    case verificationFailed(step: String, expected: String, actual: String)
 
     var errorDescription: String? {
         switch self {
-        case .commandFailed(let command, let output):
-            return "Command failed: \(command)\n\(output)"
+        case .commandFailed(let command, let exitCode, let output):
+            return "Command failed (exit \(exitCode)): \(command)\n\(output)"
         case .cancelledByUser:
             return "Cancelled (administrator password was not entered)."
+        case .locationNotFound(let name):
+            return "Location '\(name)' not found. Create it in System Settings → Network → Locations."
+        case .verificationFailed(let step, let expected, let actual):
+            return "Verification failed after '\(step)': expected '\(expected)', got '\(actual)'."
         }
     }
 }
@@ -84,6 +90,7 @@ final class NetworkManager: ObservableObject {
         guard process.terminationStatus == 0 else {
             throw NetworkManagerError.commandFailed(
                 command: "networksetup \(arguments.joined(separator: " "))",
+                exitCode: process.terminationStatus,
                 output: (out + "\n" + err).trimmingCharacters(in: .whitespacesAndNewlines)
             )
         }
@@ -109,13 +116,16 @@ final class NetworkManager: ObservableObject {
         process.waitUntilExit()
         let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        if process.terminationStatus != 0 {
+        let status = process.terminationStatus
+        if status != 0 {
             // Код -128 / "User canceled" — пользователь нажал Cancel в prompt'е.
+            // osascript пишет текст ошибки в stderr — он уже захвачен в `err` выше.
             if err.contains("User canceled") || err.contains("-128") {
                 throw NetworkManagerError.cancelledByUser
             }
             throw NetworkManagerError.commandFailed(
                 command: shellCommand,
+                exitCode: status,
                 output: (out + "\n" + err).trimmingCharacters(in: .whitespacesAndNewlines)
             )
         }
@@ -137,6 +147,14 @@ final class NetworkManager: ObservableObject {
             return out[out.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return out
+    }
+
+    /// `networksetup -listlocations` -> все существующие Locations.
+    func listLocations() throws -> [String] {
+        let out = try run(["-listlocations"])
+        return out.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     /// Имя Wi-Fi устройства (обычно en0) из `networksetup -listallhardwareports`.
@@ -210,6 +228,12 @@ final class NetworkManager: ObservableObject {
         try runPrivileged("\(Self.networksetup) -setdnsservers \(Self.shellQuote(service)) \(dns)")
     }
 
+    /// Сброс DNS-кэша после смены DNS (sudo):
+    /// `dscacheutil -flushcache; killall -HUP mDNSResponder`.
+    func flushDNS() throws {
+        try runPrivileged("/usr/bin/dscacheutil -flushcache; /usr/bin/killall -HUP mDNSResponder")
+    }
+
     // MARK: - High-level logic
 
     /// Обновить статус (вызывать из UI). Тяжёлая работа — в фоне.
@@ -258,18 +282,50 @@ final class NetworkManager: ObservableObject {
             var failure: String?
             var summary: String?
             do {
-                // 1. Проводная часть: Location переключаем всегда.
+                // 0. Проверка существования Location ДО switch — иначе молча ничего не произойдёт.
+                let locations = try self.listLocations()
+                guard locations.contains(profile.locationName) else {
+                    throw NetworkManagerError.locationNotFound(name: profile.locationName)
+                }
+                // 1. Проводная часть: Location переключаем всегда + верификация.
                 try self.switchLocation(profile.locationName)
-                // 2. Питание Wi-Fi.
+                // Применение Location не мгновенное — даём системе время.
+                Thread.sleep(forTimeInterval: 0.5)
+                let actualLocation = try self.getCurrentLocation()
+                guard actualLocation == profile.locationName else {
+                    throw NetworkManagerError.verificationFailed(
+                        step: "switch location",
+                        expected: profile.locationName,
+                        actual: actualLocation
+                    )
+                }
+                // 2. Питание Wi-Fi + верификация.
                 let device = (try? self.detectWiFiDevice()) ?? "en0"
                 try self.setWiFiPower(device: device, on: wifiOn)
-                // 3. DNS — только когда Wi-Fi включён, на ВСЕ Wi-Fi сервисы.
+                let actualPower = try self.getWiFiPower(device: device)
+                guard actualPower == wifiOn else {
+                    throw NetworkManagerError.verificationFailed(
+                        step: "set Wi-Fi power \(wifiOn ? "on" : "off") (\(device))",
+                        expected: wifiOn ? "On" : "Off",
+                        actual: actualPower ? "On" : "Off"
+                    )
+                }
+                // 3. DNS — только когда Wi-Fi включён, на ВСЕ Wi-Fi сервисы + верификация + flush.
                 var dnsTargets: [String] = []
                 if wifiOn {
                     for service in try self.getWiFiServices() {
                         try self.setDNS(service: service, dns: profile.wifiDNS)
+                        let actualDNS = (try? self.getDNS(service: service)) ?? "?"
+                        guard actualDNS.contains(profile.wifiDNS) else {
+                            throw NetworkManagerError.verificationFailed(
+                                step: "set DNS on '\(service)'",
+                                expected: profile.wifiDNS,
+                                actual: actualDNS
+                            )
+                        }
                         dnsTargets.append(service)
                     }
+                    try self.flushDNS()
                 }
                 if wifiOn {
                     summary = "Applied: \(profile.locationName) + Wi-Fi ON (\(device)), DNS \(profile.wifiDNS) → \(dnsTargets.joined(separator: ", "))"
