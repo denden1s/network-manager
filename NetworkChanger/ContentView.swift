@@ -10,17 +10,25 @@ struct ContentView: View {
             Text("Network Changer")
                 .font(.headline)
 
-            // Все сетевые службы системы, у каждой свой on/off тоггл.
+            // Все сетевые службы системы, у каждой свой on/off тоггл + её DNS под ней.
             ForEach(manager.services) { service in
-                Toggle(isOn: Binding(
-                    get: { service.enabled },
-                    set: { newValue in
-                        manager.setService(name: service.name, enabled: newValue)
+                VStack(alignment: .leading, spacing: 2) {
+                    Toggle(isOn: Binding(
+                        get: { service.enabled },
+                        set: { newValue in
+                            manager.setService(name: service.name, enabled: newValue)
+                        }
+                    )) {
+                        Label(service.name, systemImage: NetworkManager.isWiFiService(service.name) ? "wifi" : "cable.connector")
                     }
-                )) {
-                    Label(service.name, systemImage: NetworkManager.isWiFiService(service.name) ? "wifi" : "cable.connector")
+                    .toggleStyle(.switch)
+                    if let dns = manager.currentDNS[service.name] {
+                        Text("DNS: \(dns)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.leading, 28)
+                    }
                 }
-                .toggleStyle(.switch)
             }
 
             Divider()
@@ -30,13 +38,6 @@ struct ContentView: View {
                 Text("Wi-Fi (\(manager.wifiDevice)): \(manager.wifiPowerOn ? "ON" : "OFF")")
                 Text("IP: \(manager.ipAddress)")
                 Text("Gateway: \(manager.gateway)")
-                if manager.wifiServices.isEmpty {
-                    Text("Wi-Fi services: none found")
-                } else {
-                    ForEach(manager.wifiServices, id: \.self) { service in
-                        Text("DNS \(service): \(manager.currentDNS[service] ?? "?")")
-                    }
-                }
                 Text("Connected: \(manager.connectionInfo)")
             }
             .font(.caption)
@@ -54,17 +55,22 @@ struct ContentView: View {
                     .font(.caption)
             }
 
-            HStack {
-                Button("Quit") { NSApplication.shared.terminate(nil) }
+            VStack(spacing: 8) {
                 if !manager.passwordlessReady {
                     Button("Enable passwordless") { enablePasswordless() }
                         .disabled(manager.isApplying)
                         .help("Один раз спросит пароль, дальше Apply без промптов")
+                        .frame(maxWidth: .infinity)
                 }
-                Spacer()
+                Button("Quit") { NSApplication.shared.terminate(nil) }
+                    .frame(maxWidth: .infinity)
                 if manager.isApplying {
-                    ProgressView()
-                        .scaleEffect(0.6)
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                            .scaleEffect(0.6)
+                        Spacer()
+                    }
                 }
             }
         }
