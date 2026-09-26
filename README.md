@@ -1,79 +1,76 @@
-# Network Changer
+# Network Manager
 
 Нативное Swift menu-bar приложение (macOS 13+, SwiftUI, `MenuBarExtra`).
-Иконка в верхней панели (SF Symbol `network`), окно-поповер с двумя Toggle и статусом.
+Иконка в верхней панели (динамическая: `wifi` / `cable.connector`), окно-поповер:
+список всех сетевых служб с тогглами + статус (IP, шлюз, DNS, подключение).
 
-## Что делает
+## Quick Start: от исходников до запущенного приложения
 
-| Toggle 1 (профиль) | Toggle 2 (Wi-Fi) | Выполняемые действия |
-|---|---|---|
-| Work | ON | `switchtolocation ethernet_work` + `setairportpower <dev> on` + DNS `192.168.105.11` на все Wi-Fi сервисы |
-| Home | ON | `switchtolocation ethernet_home` + `setairportpower <dev> on` + DNS `8.8.8.8` на все Wi-Fi сервисы |
-| Work / Home | OFF | `setairportpower <dev> off` + `switchtolocation ethernet_work` / `ethernet_home` (активен Ethernet через Location) |
-
-Переключение любого Toggle применяется автоматически, есть также кнопка **Apply**.
-Статус показывает: активный Location (`-getcurrentlocation`), power Wi-Fi (`-getairportpower`),
-DNS каждого Wi-Fi сервиса (`-getdnsservers`).
-
-## Какие команды `networksetup` используются
-
-Без привилегий (чтение):
-- `networksetup -getcurrentlocation`
-- `networksetup -listallhardwareports` — поиск Wi-Fi устройства (обычно `en0`)
-- `networksetup -getairportpower <device>`
-- `networksetup -listallnetworkservices` — из них Wi-Fi сервисы = имя содержит `Wi-Fi`/`AirPort`
-- `networksetup -getdnsservers <service>`
-
-С привилегиями (каждая — системный prompt пароля через
-`osascript -e 'do shell script "..." with administrator privileges'`, без SMJobBless):
-- `networksetup -switchtolocation ethernet_work` / `ethernet_home`
-- `networksetup -setairportpower <device> on` / `off`
-- `networksetup -setdnsservers <service> 192.168.105.11` / `8.8.8.8` (для каждого Wi-Fi сервиса)
-
-Предварительно в системе должны существовать Locations `ethernet_work` и `ethernet_home`
-(Системные настройки → Сеть → … → Locations).
-
-## Как открыть и собрать
-
-Требуется полный Xcode (не только Command Line Tools), macOS 13 SDK+.
-
-```bash
-open NetworkChanger.xcodeproj
-```
-
-В Xcode: scheme **NetworkChanger**, target — My Mac, `⌘R` для запуска,
-`⌘B` для сборки. Подпись: ad-hoc (`CODE_SIGN_IDENTITY = "-"`), team не нужен.
-Sandbox **не** включён (иначе `networksetup`/`osascript` блокировались бы).
-`NSAppleEventsUsageDescription` добавлен в `Info.plist` (нужен для `osascript`).
-`LSUIElement = true` — иконка только в menu bar, без иконки в Dock.
-
-Проверка из терминала (когда доступен Xcode):
-
-```bash
-xcodebuild -project NetworkChanger.xcodeproj -scheme NetworkChanger -showBuildSettings
-xcodebuild -project NetworkChanger.xcodeproj -scheme NetworkChanger -configuration Debug build
-```
-
-## Структура
-
-- `NetworkChanger/NetworkChangerApp.swift` — `@main` App, `MenuBarExtra` + поповер
-- `NetworkChanger/ContentView.swift` — два Toggle (профиль Work/Home, Wi-Fi ON/OFF), статус, Apply/Refresh
-- `NetworkChanger/NetworkManager.swift` — вся обёртка над `networksetup` + `runPrivileged` через osascript
-- `NetworkChanger/Info.plist` — `LSUIElement`, `NSAppleEventsUsageDescription`
-
-## Passwordless (один пароль навсегда)
-
-Чтобы спрашивать пароль один раз при установке и дальше работать без промптов,
-приложение использует sudoers-allowlist (GUI НЕ запускается под root, SMJobBless НЕ используется).
-
-Как включить:
-1. Нажми **Enable passwordless** в поповере (рядом с Quit) — появится один системный
-   промпт пароля, дальше все Apply проходят без запросов. Кнопка прячется сама,
-   когда режим активен (проверка `sudo -n true` при каждом refresh).
-2. Или вручную из терминала:
+1. Требования: macOS 15 Sequoia, полный Xcode 16.x (не только Command Line Tools).
+   Проверка: `xcodebuild -version` (Xcode 26.x на Sequoia НЕ работает — битые плагины).
+2. Привяжи Xcode:
+   ```bash
+   sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+   sudo xcodebuild -license accept
+   xcodebuild -runFirstLaunch
+   ```
+3. Сборка + установка в `/Applications` + запуск:
+   ```bash
+   ./scripts/build-and-deploy.sh --run
+   ```
+   Флаги: `--clean` — чистая сборка; без `--run` — только собрать и положить.
+   Или вручную из Xcode: `open NetworkChanger.xcodeproj`, scheme **NetworkChanger**, `⌘R`.
+4. Один раз включи passwordless: кнопка **Enable passwordless** в поповере
+   (один промпт пароля; скрипт должен лежать в Resources бандла — см. ниже)
+   или из терминала:
    ```bash
    sudo ./scripts/install-passwordless-sudo.sh
    ```
+   Дальше все тогглы — без запросов пароля. Откат:
+   ```bash
+   sudo rm /etc/sudoers.d/network-changer
+   ```
+5. Пользуйся: включаешь одну службу — остальные не-VPN гаснут сами
+   (эксклюзивный режим); VPN-службы не трогаются. Статус внизу показывает
+   IP, шлюз и DNS активной службы. Правый клик по иконке трея — меню с Quit.
+
+## Что делает
+
+- Список всех сетевых служб (`networksetup -listallnetworkservices`), у каждой свой on/off тоггл.
+- Эксклюзивность: включается одна не-VPN служба, остальные не-VPN выключаются
+  (служба с «vpn» в имени не затрагивается никогда).
+- Wi-Fi служба: дополнительно управляет радиомодулем (`setairportpower`) —
+  при включении идёт фоновый скан `airport -s` (режим поиска, список сетей
+  обновляется для Control Center), система сама джойнится к известной сети.
+- Статус: IP (Wi-Fi либо активной проводной службы), шлюз по умолчанию,
+  DNS активной службы (нижняя строка), SSID/подключение.
+- Пароль: один раз при установке passwordless, дальше `sudo -n` без промптов;
+  без allowlist — fallback на системный промпт через osascript.
+
+## Какие команды используются
+
+Без привилегий (чтение):
+- `networksetup -listallnetworkservices` — все службы (включая выключенные)
+- `networksetup -getnetworkserviceenabled <service>` — вкл/выкл
+- `networksetup -listallhardwareports` — поиск Wi-Fi устройства (обычно `en0`)
+- `networksetup -getairportpower <device>`, `-getdnsservers <service>`, `-getinfo <service>` (IP)
+- `/sbin/route -n get default` — шлюз
+- `airport -s` — фоновый скан сетей (deprecated-утилита, warning игнорируется)
+
+С привилегиями (через `sudo -n` при установленном allowlist, иначе osascript-промпт):
+- `networksetup -setnetworkserviceenabled <service> on|off`
+- `networksetup -setairportpower <device> on|off`
+- `dscacheutil -flushcache`, `killall -HUP mDNSResponder` (после смены DNS)
+
+## Passwordless (один пароль навсегда)
+
+Приложение использует sudoers-allowlist (GUI НЕ запускается под root, SMJobBless НЕ используется).
+
+Как включить:
+1. Кнопка **Enable passwordless** в поповере (рядом с Quit) — один системный
+   промпт, дальше всё без запросов. Кнопка прячется сама, когда режим активен
+   (проверка `sudo -n -l` на наличие NOPASSWD-правила при каждом refresh).
+2. Или вручную: `sudo ./scripts/install-passwordless-sudo.sh`
 
 Что пишется в sudoers: файл `/etc/sudoers.d/network-changer` (права `0440`,
 синтаксис проверяется через `visudo -cf`):
@@ -81,16 +78,33 @@ xcodebuild -project NetworkChanger.xcodeproj -scheme NetworkChanger -configurati
 %admin ALL=(root) NOPASSWD: /usr/sbin/networksetup -setairportpower *, /usr/sbin/networksetup -setnetworkserviceenabled *, /usr/sbin/networksetup -setdnsservers *, /usr/bin/dscacheutil -flushcache, /usr/bin/killall -HUP mDNSResponder
 ```
 
-Как это работает: `runPrivileged` сначала пробует `sudo -n sh -c <команда>` без промпта
-и только если allowlist не установлен — показывает системный промпт через osascript.
+Как это работает: `runPrivilegedBin` запускает целевой бинарь напрямую через
+`sudo -n <бинарь> <аргументы>` без `sh`-посредника (иначе sudoers не матчится —
+sudo смотрит на запускаемый бинарь) и только без allowlist показывает промпт через osascript.
 
-Как откатить:
-```bash
-sudo rm /etc/sudoers.d/network-changer
-```
+Как откатить: `sudo rm /etc/sudoers.d/network-changer`
 
 Важно для сборки: `scripts/install-passwordless-sudo.sh` должен попадать в Resources
 приложения (кнопка ищет его в `Bundle.main.resourcePath`), иначе установка из UI
 упадёт с ошибкой «Script not found in app Resources». `*.pbxproj` здесь не правится —
 добавь файл в Xcode вручную: Target → Build Phases → Copy Files (Destination: Resources,
 Subpath пустой) → `+` → `scripts/install-passwordless-sudo.sh`.
+
+## Сборка
+
+Требуется полный Xcode (не только Command Line Tools), macOS 13 SDK+.
+Подпись: ad-hoc (`CODE_SIGN_IDENTITY = "-"`), team не нужен.
+Sandbox **не** включён (иначе `networksetup`/`osascript` блокировались бы).
+`NSAppleEventsUsageDescription` в `Info.plist` (нужен для `osascript`-fallback).
+`LSUIElement = true` — иконка только в menu bar, без иконки в Dock.
+Правый клик по иконке трея — меню с Quit (AppDelegate + локальный монитор
+правой кнопки только на нашей статус-иконке, левый клик и поповер не тронуты).
+
+## Структура
+
+- `NetworkChanger/NetworkChangerApp.swift` — `@main` App, `MenuBarExtra` + AppDelegate (правый клик → Quit)
+- `NetworkChanger/ContentView.swift` — список служб с тогглами, статус (IP/шлюз/DNS/Connected), Enable passwordless, Quit
+- `NetworkChanger/NetworkManager.swift` — обёртка над `networksetup`/`route`/`airport`: чтение без привилегий, изменения через `sudo -n` с fallback на osascript
+- `NetworkChanger/Info.plist` — `LSUIElement`, `NSAppleEventsUsageDescription`
+- `scripts/build-and-deploy.sh` — сборка Release + установка в `/Applications` (`--run` — запустить, `--clean` — чистая сборка)
+- `scripts/install-passwordless-sudo.sh` — установка sudoers-allowlist (один пароль)
