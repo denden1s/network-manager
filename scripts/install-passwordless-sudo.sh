@@ -2,8 +2,8 @@
 #
 # install-passwordless-sudo.sh — один запрос пароля при установке, дальше ноль промптов.
 #
-# Идемпотентно создаёт /etc/sudoers.d/network-changer с NOPASSWD-allowlist
-# только для команд, которые использует NetworkChanger.
+# Идемпотентно создаёт /etc/sudoers.d/network-manager с NOPASSWD-allowlist
+# только для команд, которые использует NetworkManager.
 #
 # Запуск вручную:
 #   sudo ./scripts/install-passwordless-sudo.sh
@@ -11,15 +11,15 @@
 #
 set -euo pipefail
 
-SUDOERS_FILE="/etc/sudoers.d/network-changer"
-STAGE_FILE="/tmp/network-changer-sudoers.stage"
+SUDOERS_FILE="/etc/sudoers.d/network-manager"
+STAGE_FILE="/tmp/network-manager-sudoers.stage"
 ALLOWLIST='%admin ALL=(root) NOPASSWD: /usr/sbin/networksetup -setairportpower *, /usr/sbin/networksetup -setnetworkserviceenabled *, /usr/sbin/networksetup -setdnsservers *, /usr/bin/dscacheutil -flushcache, /usr/bin/killall -HUP mDNSResponder'
 
 # Один запрос пароля на весь скрипт (кеширует timestamp для последующих sudo -n).
 sudo -v
 
 # Готовим содержимое локально (идемпотентно — повторный запуск даёт тот же текст).
-TMP_LOCAL="$(mktemp /tmp/network-changer-sudoers.XXXXXX)"
+TMP_LOCAL="$(mktemp /tmp/network-manager-sudoers.XXXXXX)"
 trap 'rm -f "$TMP_LOCAL"' EXIT
 printf '%s\n' "$ALLOWLIST" > "$TMP_LOCAL"
 

@@ -19,7 +19,7 @@
    ./scripts/build-and-deploy.sh --run
    ```
    Флаги: `--clean` — чистая сборка; без `--run` — только собрать и положить.
-   Или вручную из Xcode: `open NetworkChanger.xcodeproj`, scheme **NetworkChanger**, `⌘R`.
+   Или вручную из Xcode: `open NetworkManager.xcodeproj`, scheme **NetworkManager**, `⌘R`.
 4. Один раз включи passwordless: кнопка **Enable passwordless** в поповере
    (один промпт пароля; скрипт должен лежать в Resources бандла — см. ниже)
    или из терминала:
@@ -28,7 +28,7 @@
    ```
    Дальше все тогглы — без запросов пароля. Откат:
    ```bash
-   sudo rm /etc/sudoers.d/network-changer
+   sudo rm /etc/sudoers.d/network-manager
    ```
 5. Пользуйся: включаешь одну службу — остальные не-VPN гаснут сами
    (эксклюзивный режим); VPN-службы не трогаются. Статус внизу показывает
@@ -72,7 +72,7 @@
    (проверка `sudo -n -l` на наличие NOPASSWD-правила при каждом refresh).
 2. Или вручную: `sudo ./scripts/install-passwordless-sudo.sh`
 
-Что пишется в sudoers: файл `/etc/sudoers.d/network-changer` (права `0440`,
+Что пишется в sudoers: файл `/etc/sudoers.d/network-manager` (права `0440`,
 синтаксис проверяется через `visudo -cf`):
 ```
 %admin ALL=(root) NOPASSWD: /usr/sbin/networksetup -setairportpower *, /usr/sbin/networksetup -setnetworkserviceenabled *, /usr/sbin/networksetup -setdnsservers *, /usr/bin/dscacheutil -flushcache, /usr/bin/killall -HUP mDNSResponder
@@ -82,7 +82,7 @@
 `sudo -n <бинарь> <аргументы>` без `sh`-посредника (иначе sudoers не матчится —
 sudo смотрит на запускаемый бинарь) и только без allowlist показывает промпт через osascript.
 
-Как откатить: `sudo rm /etc/sudoers.d/network-changer`
+Как откатить: `sudo rm /etc/sudoers.d/network-manager`
 
 Важно для сборки: `scripts/install-passwordless-sudo.sh` должен попадать в Resources
 приложения (кнопка ищет его в `Bundle.main.resourcePath`), иначе установка из UI
@@ -102,9 +102,9 @@ Sandbox **не** включён (иначе `networksetup`/`osascript` блок�
 
 ## Структура
 
-- `NetworkChanger/NetworkChangerApp.swift` — `@main` App, `MenuBarExtra` + AppDelegate (правый клик → Quit)
-- `NetworkChanger/ContentView.swift` — список служб с тогглами, статус (IP/шлюз/DNS/Connected), Enable passwordless, Quit
-- `NetworkChanger/NetworkManager.swift` — обёртка над `networksetup`/`route`/`airport`: чтение без привилегий, изменения через `sudo -n` с fallback на osascript
-- `NetworkChanger/Info.plist` — `LSUIElement`, `NSAppleEventsUsageDescription`
+- `NetworkManager/NetworkManagerApp.swift` — `@main` App, `MenuBarExtra` + AppDelegate (правый клик → Quit)
+- `NetworkManager/ContentView.swift` — список служб с тогглами, статус (IP/шлюз/DNS/Connected), Enable passwordless, Quit
+- `NetworkManager/NetworkManager.swift` — обёртка над `networksetup`/`route`/`airport`: чтение без привилегий, изменения через `sudo -n` с fallback на osascript
+- `NetworkManager/Info.plist` — `LSUIElement`, `NSAppleEventsUsageDescription`
 - `scripts/build-and-deploy.sh` — сборка Release + установка в `/Applications` (`--run` — запустить, `--clean` — чистая сборка)
 - `scripts/install-passwordless-sudo.sh` — установка sudoers-allowlist (один пароль)

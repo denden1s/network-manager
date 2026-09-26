@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 @main
-struct NetworkChangerApp: App {
+struct NetworkManagerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var manager = NetworkManager()
 

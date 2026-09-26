@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A1B2C3D4000A000000000001"
-               BuildableName = "NetworkChanger.app"
-               BlueprintName = "NetworkChanger"
-               ReferencedContainer = "container:NetworkChanger.xcodeproj">
+               BuildableName = "NetworkManager.app"
+               BlueprintName = "NetworkManager"
+               ReferencedContainer = "container:NetworkManager.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -45,9 +45,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A1B2C3D4000A000000000001"
-            BuildableName = "NetworkChanger.app"
-            BlueprintName = "NetworkChanger"
-            ReferencedContainer = "container:NetworkChanger.xcodeproj">
+            BuildableName = "NetworkManager.app"
+            BlueprintName = "NetworkManager"
+            ReferencedContainer = "container:NetworkManager.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -62,9 +62,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A1B2C3D4000A000000000001"
-            BuildableName = "NetworkChanger.app"
-            BlueprintName = "NetworkChanger"
-            ReferencedContainer = "container:NetworkChanger.xcodeproj">
+            BuildableName = "NetworkManager.app"
+            BlueprintName = "NetworkManager"
+            ReferencedContainer = "container:NetworkManager.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

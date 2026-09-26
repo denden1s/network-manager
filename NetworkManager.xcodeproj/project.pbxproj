@@ -7,14 +7,14 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A1B2C3D4000E000000000001 /* NetworkChangerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40006000000000001 /* NetworkChangerApp.swift */; };
+		A1B2C3D4000E000000000001 /* NetworkManagerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40006000000000001 /* NetworkManagerApp.swift */; };
 		A1B2C3D4000F000000000001 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40007000000000001 /* ContentView.swift */; };
 		A1B2C3D40010000000000001 /* NetworkManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40008000000000001 /* NetworkManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		A1B2C3D40005000000000001 /* NetworkChanger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NetworkChanger.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		A1B2C3D40006000000000001 /* NetworkChangerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkChangerApp.swift; sourceTree = "<group>"; };
+		A1B2C3D40005000000000001 /* NetworkManager.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NetworkManager.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1B2C3D40006000000000001 /* NetworkManagerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkManagerApp.swift; sourceTree = "<group>"; };
 		A1B2C3D40007000000000001 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A1B2C3D40008000000000001 /* NetworkManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkManager.swift; sourceTree = "<group>"; };
 		A1B2C3D40009000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -34,7 +34,7 @@
 		A1B2C3D40002000000000001 = {
 			isa = PBXGroup;
 			children = (
-				A1B2C3D40004000000000001 /* NetworkChanger */,
+				A1B2C3D40004000000000001 /* NetworkManager */,
 				A1B2C3D40003000000000001 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -42,28 +42,28 @@
 		A1B2C3D40003000000000001 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				A1B2C3D40005000000000001 /* NetworkChanger.app */,
+				A1B2C3D40005000000000001 /* NetworkManager.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
 		};
-		A1B2C3D40004000000000001 /* NetworkChanger */ = {
+		A1B2C3D40004000000000001 /* NetworkManager */ = {
 			isa = PBXGroup;
 			children = (
-				A1B2C3D40006000000000001 /* NetworkChangerApp.swift */,
+				A1B2C3D40006000000000001 /* NetworkManagerApp.swift */,
 				A1B2C3D40007000000000001 /* ContentView.swift */,
 				A1B2C3D40008000000000001 /* NetworkManager.swift */,
 				A1B2C3D40009000000000001 /* Info.plist */,
 			);
-			path = NetworkChanger;
+			path = NetworkManager;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A1B2C3D4000A000000000001 /* NetworkChanger */ = {
+		A1B2C3D4000A000000000001 /* NetworkManager */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = A1B2C3D40012000000000001 /* Build configuration list for PBXNativeTarget "NetworkChanger" */;
+			buildConfigurationList = A1B2C3D40012000000000001 /* Build configuration list for PBXNativeTarget "NetworkManager" */;
 			buildPhases = (
 				A1B2C3D4000B000000000001 /* Sources */,
 				A1B2C3D4000C000000000001 /* Frameworks */,
@@ -73,9 +73,9 @@
 			);
 			dependencies = (
 			);
-			name = NetworkChanger;
-			productName = NetworkChanger;
-			productReference = A1B2C3D40005000000000001 /* NetworkChanger.app */;
+			name = NetworkManager;
+			productName = NetworkManager;
+			productReference = A1B2C3D40005000000000001 /* NetworkManager.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -93,7 +93,7 @@
 					};
 				};
 			};
-			buildConfigurationList = A1B2C3D40011000000000001 /* Build configuration list for PBXProject "NetworkChanger" */;
+			buildConfigurationList = A1B2C3D40011000000000001 /* Build configuration list for PBXProject "NetworkManager" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -105,7 +105,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				A1B2C3D4000A000000000001 /* NetworkChanger */,
+				A1B2C3D4000A000000000001 /* NetworkManager */,
 			);
 		};
 /* End PBXProject section */
@@ -127,7 +127,7 @@
 			files = (
 				A1B2C3D40010000000000001 /* NetworkManager.swift in Sources */,
 				A1B2C3D4000F000000000001 /* ContentView.swift in Sources */,
-				A1B2C3D4000E000000000001 /* NetworkChangerApp.swift in Sources */,
+				A1B2C3D4000E000000000001 /* NetworkManagerApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -202,14 +202,14 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = NetworkChanger/Info.plist;
+				INFOPLIST_FILE = NetworkManager/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = local.NetworkChanger;
+				PRODUCT_BUNDLE_IDENTIFIER = local.NetworkManager;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -229,14 +229,14 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = NetworkChanger/Info.plist;
+				INFOPLIST_FILE = NetworkManager/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = local.NetworkChanger;
+				PRODUCT_BUNDLE_IDENTIFIER = local.NetworkManager;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -247,7 +247,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		A1B2C3D40011000000000001 /* Build configuration list for PBXProject "NetworkChanger" */ = {
+		A1B2C3D40011000000000001 /* Build configuration list for PBXProject "NetworkManager" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A1B2C3D40013000000000001 /* Debug */,
@@ -256,7 +256,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		A1B2C3D40012000000000001 /* Build configuration list for PBXNativeTarget "NetworkChanger" */ = {
+		A1B2C3D40012000000000001 /* Build configuration list for PBXNativeTarget "NetworkManager" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A1B2C3D40015000000000001 /* Debug */,

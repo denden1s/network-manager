@@ -1,13 +1,13 @@
 #!/bin/bash
-# Build + deploy NetworkChanger via terminal.
+# Build + deploy NetworkManager via terminal.
 # Usage: ./scripts/build-and-deploy.sh [--run] [--clean]
 set -euo pipefail
 
-PROJECT="NetworkChanger.xcodeproj"
-SCHEME="NetworkChanger"
+PROJECT="NetworkManager.xcodeproj"
+SCHEME="NetworkManager"
 CONFIG="Release"
 BUILD_DIR="$(pwd)/build"
-APP_NAME="NetworkChanger.app"
+APP_NAME="NetworkManager.app"
 DEST="/Applications/${APP_NAME}"
 
 RUN_AFTER=false
@@ -46,7 +46,7 @@ fi
 echo "==> Built: $BUILT_APP"
 
 echo "==> Deploying to $DEST..."
-if pkill -x NetworkChanger 2>/dev/null; then
+if pkill -x NetworkManager 2>/dev/null; then
   sleep 1
 fi
 rm -rf "$DEST"
