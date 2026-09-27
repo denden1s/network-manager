@@ -14,6 +14,8 @@ enum NetworkManagerError: LocalizedError {
     case locationNotFound(name: String)
     case serviceNotFound(name: String, available: [String])
     case verificationFailed(step: String, expected: String, actual: String)
+    case invalidDNS(address: String)
+    case noActiveService
 
     var errorDescription: String? {
         switch self {
@@ -27,6 +29,10 @@ enum NetworkManagerError: LocalizedError {
             return "Service '\(name)' not found. Available: \(available.joined(separator: ", "))"
         case .verificationFailed(let step, let expected, let actual):
             return "Verification failed after '\(step)': expected '\(expected)', got '\(actual)'."
+        case .invalidDNS(let address):
+            return "Invalid DNS address: \(address)"
+        case .noActiveService:
+            return "No active service (no enabled non-VPN service found)."
         }
     }
 }
@@ -315,6 +321,43 @@ final class NetworkManager: ObservableObject {
         name.localizedCaseInsensitiveContains("vpn")
     }
 
+    /// DNS-адрес валиден? IPv4 (4 октета 0–255) или IPv6 (hex-группы через ':', простая проверка).
+    /// Невалидный адрес — ошибка `invalidDNS` ДО любых системных вызовов.
+    static func isValidDNS(_ value: String) -> Bool {
+        isValidIPv4(value) || isValidIPv6(value)
+    }
+
+    private static func isValidIPv4(_ value: String) -> Bool {
+        let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        for part in parts {
+            guard !part.isEmpty, part.count <= 3, part.allSatisfy({ $0.isNumber }) else { return false }
+            guard let octet = Int(part), (0...255).contains(octet) else { return false }
+        }
+        return true
+    }
+
+    private static func isValidIPv6(_ value: String) -> Bool {
+        guard value.contains(":") else { return false }
+        if value == "::" { return true }
+        // Одиночное ':' в начале/конце — невалидно ("::" — ок).
+        if value.hasPrefix(":") && !value.hasPrefix("::") { return false }
+        if value.hasSuffix(":") && !value.hasSuffix("::") { return false }
+        // Сжатие "::" — не более одного.
+        guard value.components(separatedBy: "::").count - 1 <= 1 else { return false }
+        let groups = value.split(separator: ":", omittingEmptySubsequences: true)
+        guard !groups.isEmpty, groups.count <= 8 else { return false }
+        for group in groups {
+            guard group.count >= 1, group.count <= 4,
+                  group.allSatisfy({ $0.isHexDigit }) else { return false }
+        }
+        // Без "::" — ровно 8 групп; с "::" — меньше 8 (сжатие заменяет минимум одну группу).
+        if value.contains("::") {
+            return groups.count <= 7
+        }
+        return groups.count == 8
+    }
+
     /// Подмножество сервисов, являющихся Wi-Fi.
     func getWiFiServices() throws -> [String] {
         return try getAllServices().filter { Self.isWiFiService($0) }
@@ -478,9 +521,47 @@ final class NetworkManager: ObservableObject {
         try runPrivilegedBin(path: Self.networksetup, args: ["-setairportpower", device, state])
     }
 
-    /// `networksetup -setdnsservers <service> <dns>` (sudo).
+    /// `networksetup -setdnsservers <service> <dns1> <dns2> ...` (sudo)
+    /// + verify (`getDNS` содержит каждый адрес) + `flushDNS()`.
+    /// Валидация адресов — ДО любых системных вызовов.
+    func setDNSServers(service: String, servers: [String]) throws {
+        let cleaned = servers
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else {
+            throw NetworkManagerError.invalidDNS(address: "(empty — use Auto for DHCP)")
+        }
+        for server in cleaned {
+            guard Self.isValidDNS(server) else {
+                throw NetworkManagerError.invalidDNS(address: server)
+            }
+        }
+        try runPrivilegedBin(path: Self.networksetup, args: ["-setdnsservers", service] + cleaned)
+        // Применение не мгновенное — даём системе время.
+        Thread.sleep(forTimeInterval: 0.5)
+        let current = try getDNS(service: service)
+        for server in cleaned {
+            guard current.contains(server) else {
+                throw NetworkManagerError.verificationFailed(
+                    step: "set DNS servers for '\(service)'",
+                    expected: cleaned.joined(separator: " "),
+                    actual: current
+                )
+            }
+        }
+        try flushDNS()
+    }
+
+    /// Один DNS — обёртка над `setDNSServers(service:servers:)` (sudo + verify + flush).
     func setDNS(service: String, dns: String) throws {
-        try runPrivilegedBin(path: Self.networksetup, args: ["-setdnsservers", service, dns])
+        try setDNSServers(service: service, servers: [dns])
+    }
+
+    /// Сброс DNS на автоматические (DHCP): `networksetup -setdnsservers <service> empty` (sudo)
+    /// + `flushDNS()`. Verify не строгий: успех = отсутствие ошибки.
+    func clearDNS(service: String) throws {
+        try runPrivilegedBin(path: Self.networksetup, args: ["-setdnsservers", service, "empty"])
+        try flushDNS()
     }
 
     /// Сброс DNS-кэша после смены DNS (sudo): два прямых вызова без shell —
@@ -645,6 +726,85 @@ final class NetworkManager: ObservableObject {
                     }
                 }
                 summary = "Service '\(name)' \(enabled ? "ON" : "OFF")"
+            } catch {
+                failure = error.localizedDescription
+            }
+            let capturedFailure = failure
+            let capturedSummary = summary
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.isApplying = false
+                self.lastError = capturedFailure
+                self.lastSummary = capturedSummary
+                self.refresh()
+            }
+        }
+    }
+
+    /// Активная служба для DNS: первая включённая не-VPN (та же логика, что exclusivity).
+    /// Читает опубликованный `services` — вызывать с main (подпись в UI).
+    func activeServiceName() -> String? {
+        services.first(where: { $0.enabled && !Self.isVPNService($0.name) })?.name
+    }
+
+    /// Свежее разрешение активной службы в фоне (не зависит от кэша UI):
+    /// первая включённая не-VPN, иначе `noActiveService`.
+    private func resolveActiveService() throws -> String {
+        for name in try getAllServices() where !Self.isVPNService(name) {
+            if (try? getServiceEnabled(name)) ?? false {
+                return name
+            }
+        }
+        throw NetworkManagerError.noActiveService
+    }
+
+    /// Ручной DNS на активную службу (фон, как остальные apply).
+    /// Ошибки → `lastError`, успех → `lastSummary`, в конце `refresh()`.
+    func applyDNSServers(_ servers: [String]) {
+        DispatchQueue.main.async { [weak self] in
+            self?.isApplying = true
+            self?.lastError = nil
+            self?.lastSummary = nil
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            var failure: String?
+            var summary: String?
+            do {
+                let active = try self.resolveActiveService()
+                try self.setDNSServers(service: active, servers: servers)
+                summary = "DNS for '\(active)' → \(servers.joined(separator: " "))"
+            } catch {
+                failure = error.localizedDescription
+            }
+            let capturedFailure = failure
+            let capturedSummary = summary
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.isApplying = false
+                self.lastError = capturedFailure
+                self.lastSummary = capturedSummary
+                self.refresh()
+            }
+        }
+    }
+
+    /// Сброс DNS активной службы на автоматические/DHCP (фон, как остальные apply).
+    /// Ошибки → `lastError`, успех → `lastSummary`, в конце `refresh()`.
+    func applyAutoDNS() {
+        DispatchQueue.main.async { [weak self] in
+            self?.isApplying = true
+            self?.lastError = nil
+            self?.lastSummary = nil
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            var failure: String?
+            var summary: String?
+            do {
+                let active = try self.resolveActiveService()
+                try self.clearDNS(service: active)
+                summary = "DNS for '\(active)' → Auto (DHCP)"
             } catch {
                 failure = error.localizedDescription
             }

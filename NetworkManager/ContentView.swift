@@ -3,6 +3,7 @@ import SwiftUI
 /// Окно-поповер из menu-bar иконки: тогглы всех служб + статус.
 struct ContentView: View {
     @ObservedObject var manager: NetworkManager
+    @State private var dnsInput: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -37,6 +38,35 @@ struct ContentView: View {
             }
             .font(.caption)
             .textSelection(.enabled)
+
+            Divider()
+
+            // Ручной DNS для активной службы (первая включённая не-VPN).
+            // Поле после Set/Auto НЕ очищается — статус обновится через refresh.
+            Group {
+                TextField("DNS через пробел, напр. 8.8.8.8 1.1.1.1", text: $dnsInput)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Button("Set") {
+                        let servers = dnsInput.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+                        manager.applyDNSServers(servers)
+                    }
+                    .disabled(manager.isApplying)
+                    Button("Auto") {
+                        manager.applyAutoDNS()
+                    }
+                    .disabled(manager.isApplying)
+                    Spacer()
+                }
+                if let active = manager.activeServiceName() {
+                    Text("→ \(active)")
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("нет активной службы")
+                        .foregroundColor(.secondary)
+                }
+            }
+            .font(.caption)
 
             if let error = manager.lastError {
                 Text(error)
