@@ -16,19 +16,24 @@ for arg in "$@"; do
   case "$arg" in
     --run) RUN_AFTER=true ;;
     --clean) CLEAN=true ;;
-    *) echo "Unknown arg: $arg (allowed: --run --clean)"; exit 1 ;;
+    *) echo "error: unknown arg: $arg (allowed: --run --clean)" >&2; exit 1 ;;
   esac
 done
 
 if ! command -v xcodebuild >/dev/null; then
-  echo "error: нужен полный Xcode (xcodebuild не найден, стоят только CLT)"
+  echo "error: нужен полный Xcode (xcodebuild не найден, стоят только CLT)" >&2
+  exit 1
+fi
+
+if [ ! -d "$PROJECT" ]; then
+  echo "error: $PROJECT не найден — запускай скрипт из корня репозитория" >&2
   exit 1
 fi
 
 if [ "$CLEAN" = true ]; then
   rm -rf "$BUILD_DIR"
 fi
-mkdir -p "$BUILD_DIR" scripts
+mkdir -p "$BUILD_DIR"
 
 echo "==> Building ${SCHEME} (${CONFIG})..."
 xcodebuild \
@@ -38,9 +43,11 @@ xcodebuild \
   -derivedDataPath "$BUILD_DIR/DerivedData" \
   build
 
-BUILT_APP="$(find "$BUILD_DIR/DerivedData" -name "$APP_NAME" -type d | head -n 1)"
+# `|| true`: head закрывает пайп после первой строки, find ловит SIGPIPE — без
+# этого pipefail+set -e роняют скрипт на успешной сборке.
+BUILT_APP="$(find "$BUILD_DIR/DerivedData" -name "$APP_NAME" -type d | head -n 1 || true)"
 if [ -z "${BUILT_APP:-}" ]; then
-  echo "error: .app не найден в $BUILD_DIR/DerivedData"
+  echo "error: .app не найден в $BUILD_DIR/DerivedData" >&2
   exit 1
 fi
 echo "==> Built: $BUILT_APP"
