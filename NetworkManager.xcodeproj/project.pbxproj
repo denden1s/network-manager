@@ -10,7 +10,22 @@
 		A1B2C3D4000E000000000001 /* NetworkManagerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40006000000000001 /* NetworkManagerApp.swift */; };
 		A1B2C3D4000F000000000001 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40007000000000001 /* ContentView.swift */; };
 		A1B2C3D40010000000000001 /* NetworkManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40008000000000001 /* NetworkManager.swift */; };
+		A1B2C3D40018000000000001 /* install-passwordless-sudo.sh in Copy Files */ = {isa = PBXBuildFile; fileRef = A1B2C3D40017000000000001 /* install-passwordless-sudo.sh */; };
+		A1B2C3D4001A000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4001B000000000001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A1B2C3D40019000000000001 /* Copy install-passwordless-sudo.sh to Resources */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 7;
+			files = (
+				A1B2C3D40018000000000001 /* install-passwordless-sudo.sh in Copy Files */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		A1B2C3D40005000000000001 /* NetworkManager.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NetworkManager.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -18,6 +33,8 @@
 		A1B2C3D40007000000000001 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A1B2C3D40008000000000001 /* NetworkManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkManager.swift; sourceTree = "<group>"; };
 		A1B2C3D40009000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A1B2C3D40017000000000001 /* install-passwordless-sudo.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "../scripts/install-passwordless-sudo.sh"; sourceTree = "<group>"; };
+		A1B2C3D4001B000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -54,6 +71,8 @@
 				A1B2C3D40007000000000001 /* ContentView.swift */,
 				A1B2C3D40008000000000001 /* NetworkManager.swift */,
 				A1B2C3D40009000000000001 /* Info.plist */,
+				A1B2C3D40017000000000001 /* install-passwordless-sudo.sh */,
+				A1B2C3D4001B000000000001 /* Assets.xcassets */,
 			);
 			path = NetworkManager;
 			sourceTree = "<group>";
@@ -68,6 +87,7 @@
 				A1B2C3D4000B000000000001 /* Sources */,
 				A1B2C3D4000C000000000001 /* Frameworks */,
 				A1B2C3D4000D000000000001 /* Resources */,
+				A1B2C3D40019000000000001 /* Copy install-passwordless-sudo.sh to Resources */,
 			);
 			buildRules = (
 			);
@@ -115,6 +135,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1B2C3D4001A000000000001 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -193,6 +214,7 @@
 		A1B2C3D40015000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;
@@ -220,6 +242,7 @@
 		A1B2C3D40016000000000001 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_STYLE = Manual;

@@ -7,7 +7,7 @@ struct NetworkManagerApp: App {
     @StateObject private var manager = NetworkManager()
 
     var body: some Scene {
-        MenuBarExtra("Network Manager", systemImage: manager.wifiPowerOn ? "wifi" : "cable.connector") {
+        MenuBarExtra("Network Manager",             systemImage: manager.wifiPowerOn ? "wifi" : "cable.connector") {
             ContentView(manager: manager)
         }
         .menuBarExtraStyle(.window)

@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import ServiceManagement
 
 /// Состояние одной сетевой службы для списка тогглов в поповере.
 struct ServiceState: Identifiable {
@@ -43,7 +44,7 @@ struct NetworkStatus {
     var wifiPowerOn: Bool = false
     var wifiServices: [String] = []
     var dnsByService: [String: String] = [:]
-    var connectionInfo: String = "unknown"
+    var connectionInfo: String = "…"
     var ipAddress: String = "?"
     var gateway: String = "?"
 }
@@ -64,7 +65,16 @@ final class NetworkManager: ObservableObject {
     static let killall = "/usr/bin/killall"
     static let route = "/sbin/route"
     static let netstat = "/usr/sbin/netstat"
-    static let airportCLI = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
+    /// Источник SSID на macOS 15+ (`getsummary` печатает `SSID : ...`).
+    /// Читается БЕЗ sudo: редирекцией управляет глобальная настройка HideWiFiInfo,
+    /// а не права процесса. Единственный вызов под sudo — `sethidewifiinfo`
+    /// по явному согласию пользователя (см. `grantSSIDDisclosureConsent`).
+    static let ipconfig = "/usr/sbin/ipconfig"
+
+    /// UserDefaults: пользователь РАЗРЕШИЛ показывать SSID (системное скрытие снято).
+    private static let keySSIDConsent = "nm.ssidDisclosure.consentGranted"
+    /// UserDefaults: пользователь отказался («не сейчас») — больше не предлагаем.
+    private static let keySSIDDeclined = "nm.ssidDisclosure.declined"
 
     @Published var wifiDevice: String = "en0"
     @Published var wifiPowerOn: Bool = false
@@ -74,10 +84,34 @@ final class NetworkManager: ObservableObject {
     @Published var isApplying: Bool = false
     @Published var lastError: String?
     @Published var lastSummary: String?
-    @Published var connectionInfo: String = "unknown"
+    @Published var connectionInfo: String = "…"
     @Published var ipAddress: String = "?"
     @Published var gateway: String = "?"
     @Published var passwordlessReady: Bool = false
+    @Published var autostartEnabled = false
+
+    /// macOS скрывает SSID, сеть ассоциирована, и согласие ещё не дано (и не отказано) —
+    /// UI должен предложить выбор. Молча снимать скрытие нельзя: это СИСТЕМНАЯ настройка
+    /// приватности, после неё SSID/BSSID видят все процессы на Mac, включая чужие.
+    @Published var isSSIDDisclosureAvailable: Bool = false
+    /// Считаем, что скрытие Wi-Fi-инфо снято (мы это сделали по согласию) — показать откат.
+    @Published var isWiFiInfoRedactionDisabled: Bool = false
+
+    /// Согласие/отказ в UserDefaults, а не в @Published: UI интересуют только два флага выше.
+    private var ssidDisclosureConsent: Bool
+    private var ssidDisclosureDeclined: Bool
+
+    init() {
+        // Решение пользователя переживает перезапуск: иначе вопрос про раскрытие SSID
+        // появлялся бы заново при каждом запуске приложения.
+        let defaults = UserDefaults.standard
+        let consent = defaults.bool(forKey: Self.keySSIDConsent)
+        self.ssidDisclosureConsent = consent
+        self.ssidDisclosureDeclined = defaults.bool(forKey: Self.keySSIDDeclined)
+        // До первого зонда реальное состояние настройки неизвестно — считаем его по факту
+        // нашего согласия; `restoreWiFiInfoRedaction` доступен в любом случае.
+        self.isWiFiInfoRedactionDisabled = consent
+    }
 
     // MARK: - Low-level execution
 
@@ -189,44 +223,6 @@ final class NetworkManager: ObservableObject {
         return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    /// Фоновый скан Wi-Fi сетей (`airport -s`). Best-effort: при любой ошибке
-    /// возвращает [] и НЕ валит apply. Требует включённый радиомодуль,
-    /// иначе список пуст. Deprecation-warning `airport` уходит в stderr и игнорируется.
-    func scanWiFi() -> [String] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: Self.airportCLI)
-        process.arguments = ["-s"]
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            return []
-        }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return [] }
-        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        // SSID может содержать пробелы, поэтому режем строку по BSSID (MAC),
-        // а не по пробелам. Строка-заголовок ("SSID BSSID ...") MAC не содержит и пропускается.
-        guard let macRegex = try? NSRegularExpression(pattern: "([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}") else { return [] }
-        var seen = Set<String>()
-        var result: [String] = []
-        for rawLine in out.components(separatedBy: "\n") {
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            if line.isEmpty { continue }
-            let range = NSRange(line.startIndex..<line.endIndex, in: line)
-            guard let match = macRegex.firstMatch(in: line, range: range),
-                  let macRange = Range(match.range, in: line) else { continue }
-            let ssid = String(line[..<macRange.lowerBound]).trimmingCharacters(in: .whitespaces)
-            if !ssid.isEmpty, !seen.contains(ssid) {
-                seen.insert(ssid)
-                result.append(ssid)
-            }
-        }
-        return result
-    }
-
     // MARK: - Getters (без привилегий)
 
     /// Проверка passwordless-режима через `sudo -n -l` (что разрешён NOPASSWD
@@ -248,24 +244,6 @@ final class NetworkManager: ObservableObject {
         guard process.terminationStatus == 0 else { return false }
         let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         return out.contains("NOPASSWD") && out.contains("networksetup")
-    }
-
-    /// `networksetup -getcurrentlocation` -> "ethernet_work" / "ethernet_home".
-    func getCurrentLocation() throws -> String {
-        let out = try run(["-getcurrentlocation"])
-        // Вывод вида "Current set: ethernet_work" — забираем часть после двоеточия.
-        if let colon = out.firstIndex(of: ":") {
-            return out[out.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return out
-    }
-
-    /// `networksetup -listlocations` -> все существующие Locations.
-    func listLocations() throws -> [String] {
-        let out = try run(["-listlocations"])
-        return out.components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
     }
 
     /// Имя Wi-Fi устройства (обычно en0) из `networksetup -listallhardwareports`.
@@ -321,6 +299,44 @@ final class NetworkManager: ObservableObject {
         name.localizedCaseInsensitiveContains("vpn")
     }
 
+    /// Конкурирующий аплинк — служба, ради которой действительно стоит гасить другие:
+    /// только Wi-Fi и Ethernet. Всё остальное (мосты, USB-тетердинг, PAN, виртуальные
+    /// адаптеры) не является конкурентом выхода в интернет, и раньше правило «гасим всех
+    /// не-VPN» выключало Thunderbolt Bridge и iPhone USB — то есть у живого тетерринга
+    /// и моста пропадал интернет вместе с Wi-Fi.
+    ///
+    /// ПОЧЕМУ ПО ИМЕНИ, А НЕ ПО ЖЕЛЕЗУ: авторитетной команды нет. У `networksetup` на
+    /// macOS 15 нет `-listnetworkservicehardwareports` (проверено: печатает usage и
+    /// падает с "command is not recognized"), `SCNetworkConfiguration` из
+    /// SystemConfiguration не отдаётся в Swift, а `system_profiler SPNetworkDataType`
+    /// печатает только ВКЛЮЧЁННЫЕ службы — ровно те, которые эксклюзивность и не трогает.
+    /// Остаётся имя, как в `isWiFiService`/`isVPNService`.
+    ///
+    /// ПОРЯДОК ПРОВЕРОК: сначала VPN и «не настоящий интерфейс» (у виртуального/туннельного
+    /// адаптера в имени может встретиться «ethernet», поэтому его отсекаем первым), затем
+    /// положительные маркеры аплинка. Всё неузнанное считается НЕ конкурентом: гасить
+    /// чужую службу наугад — худшее поведение для разрушительной операции.
+    ///
+    /// «usb» в негативных маркерах намеренно НЕТ: USB — это вид шины, а не тип линии.
+    /// Тетердинг отсекается более точными маркерами (iphone/android/tether/hotspot), а
+    /// USB-Ethernet («USB 10/100/1000 LAN», «USB Ethernet») — это настоящий аплинк, и его
+    /// мы ловим положительным маркером. Поэтому «lan» сравнивается ЦЕЛЫМ СЛОВОМ, иначе
+    /// под «lan» попало бы что угодно (Island, Plan).
+    static func isCompetingUplink(_ name: String) -> Bool {
+        let n = name.lowercased()
+        if isVPNService(name) { return false }
+        let virtualMarkers = ["bridge", "tunnel", "loopback", "virtual", "vbox", "vmware",
+                              "parallels", "docker", "utun", "wg", "tailscale", "bear",
+                              "tether", "iphone", "android", "hotspot",
+                              "modem", "wwan", "cellular", "bluetooth", "thunderbolt",
+                              "personal area"]
+        if virtualMarkers.contains(where: { n.contains($0) }) { return false }
+        // Реальные конкуренты: Wi-Fi и Ethernet.
+        if isWiFiService(name) || n.contains("ethernet") { return true }
+        let words = n.split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "_" })
+        return words.contains("lan")
+    }
+
     /// DNS-адрес валиден? IPv4 (4 октета 0–255) или IPv6 (hex-группы через ':', простая проверка).
     /// Невалидный адрес — ошибка `invalidDNS` ДО любых системных вызовов.
     static func isValidDNS(_ value: String) -> Bool {
@@ -356,11 +372,6 @@ final class NetworkManager: ObservableObject {
             return groups.count <= 7
         }
         return groups.count == 8
-    }
-
-    /// Подмножество сервисов, являющихся Wi-Fi.
-    func getWiFiServices() throws -> [String] {
-        return try getAllServices().filter { Self.isWiFiService($0) }
     }
 
     /// `networksetup -getdnsservers <service>` (сырой вывод).
@@ -475,39 +486,340 @@ final class NetworkManager: ObservableObject {
         return trimmed.localizedCaseInsensitiveContains("Enabled")
     }
 
-    /// Сводка подключения БЕЗ привилегий, НЕ бросает (внутри try? + fallback "unknown"):
-    /// SSID через `networksetup -getairportnetwork <device>` (сырой вывод как есть)
-    /// + IP через `networksetup -getinfo <первый wifi-сервис>` (строка "IP address:").
-    func getConnectionSummary() -> String {
-        var ssid = "unknown"
-        var ip = "unknown"
-        let device = (try? detectWiFiDevice()) ?? "en0"
-        if let out = try? run(["-getairportnetwork", device]) {
-            let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { ssid = trimmed }
+    /// Накопитель вывода `Process` под двумя параллельными читателями:
+    /// `readDataToEndOfFile()` на main нельзя (блокирует), а читать после
+    /// `waitUntilExit()` нельзя — большой stdout забивает буфер Pipe (64 КБ)
+    /// и процесс вечно висит на write(). Нужен, потому что читаем с двух пайпов.
+    private final class ProcessOutputBox {
+        private let lock = NSLock()
+        private var data = Data()
+
+        func append(_ chunk: Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            data.append(chunk)
         }
-        if let service = (try? getWiFiServices())?.first,
-           let info = try? run(["-getinfo", service]) {
-            for rawLine in info.components(separatedBy: "\n") {
-                let line = rawLine.trimmingCharacters(in: .whitespaces)
-                if line.hasPrefix("IP address:") {
-                    let value = line
-                        .replacingOccurrences(of: "IP address:", with: "")
-                        .trimmingCharacters(in: .whitespaces)
-                    if !value.isEmpty { ip = value }
-                    break
+
+        var string: String {
+            lock.lock()
+            defer { lock.unlock() }
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+    }
+
+    /// Что именно удалось вычитать из `ipconfig getsummary <device>`.
+    /// Различать эти состояния обязательно: обычный `String?` на всё отвечал nil'ом
+    /// и «macOS прячет имя сети», и «сети нет вообще» — а это противоположные вещи
+    /// с противоположными последствиями (см. `grantSSIDDisclosureConsent`).
+    private enum SSIDRead {
+        /// Реальное имя сети.
+        case value(String)
+        /// Буквально "<redacted>": система скрывает имя (HideWiFiInfo включён).
+        case redacted
+        /// Строки SSID нет или она пустая — прятать нечего, назвать нечего.
+        /// Wi-Fi выключен, нет ассоциации, неверное имя устройства, Ethernet-сессия.
+        case absent
+    }
+
+    /// SSID из вывода `ipconfig getsummary <device>`; различает реальное значение,
+    /// `<redacted>` (скрытие включено глобальной настройкой HideWiFiInfo — действует
+    /// на все uid, включая root, поэтому правами редирекцию не обойти; лечится
+    /// `sethidewifiinfo 0`, см. `grantSSIDDisclosureConsent`) и полное отсутствие строки.
+    /// Реальная строка вывода: "  SSID : MyNet" (два ведущих пробела), и рядом ВСЕГДА
+    /// лежит "  BSSID : ..." — поэтому сравниваем префикс ПОСЛЕ trim и строго "SSID",
+    /// иначе "BSSID" матчился бы как SSID и в UI уехал бы MAC-адрес как имя сети.
+    /// Значение режем по первому ":" с сохранением остатка (в имени сети двоеточие
+    /// теоретически возможно), лишние пробелы по краям убираем.
+    private static func parseSSID(fromIpconfigSummary output: String) -> SSIDRead {
+        for rawLine in output.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("SSID"), line.contains(":") else { continue }
+            let value = line.components(separatedBy: ":").dropFirst().joined(separator: ":")
+                .trimmingCharacters(in: .whitespaces)
+            // `<redacted>` — не значение, а отказ системы раскрывать SSID: это отдельное
+            // состояние, а не «nil», иначе выключенный Wi-Fi выглядел бы как редирекция.
+            if value == "<redacted>" { return .redacted }
+            guard !value.isEmpty else { continue }
+            return .value(value)
+        }
+        return .absent
+    }
+
+    /// Есть ли в выводе `ipconfig getsummary` признак того, что интерфейс АССОЦИИРОВАН
+    /// с сетью: непустая строка `BSSID : ...` (MAC точки доступа) появляется ровно при
+    /// ассоциации и исчезает при выключенном/неассоциированном Wi-Fi. Проверяем по ТОМУ ЖЕ
+    /// выводу, что уже прочитан — лишних процессов не надо.
+    /// Значение, в том числе `<redacted>`, годится как доказательство: BSSID бывает
+    /// скрыт той же настройкой HideWiFiInfo, что и SSID, т.е. в самом интересном для нас
+    /// случае (реально подключено, но имя скрыто) она как раз и приходит непустой —
+    /// требовать «некрасную» BSSID значило бы запретить лечение именно там, где оно нужно.
+    private static func hasAssociationEvidence(fromIpconfigSummary output: String) -> Bool {
+        for rawLine in output.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard line.hasPrefix("BSSID"), line.contains(":") else { continue }
+            let value = line.components(separatedBy: ":").dropFirst().joined(separator: ":")
+                .trimmingCharacters(in: .whitespaces)
+            return !value.isEmpty
+        }
+        return false
+    }
+
+    /// Тихий запуск одного процесса: stdout при exit 0, иначе nil. НИКОГДА не показывает
+    /// системный prompt пароля (osascript здесь не используется в принципе) и НИКОГДА
+    /// не бросает — только для фоновых чтений, где отсутствие результата не ошибка.
+    /// Антизависание — три вещи: stdin = /dev/null (вводить нечего, ждать нечего),
+    /// оба пайпа читаются ПАРАЛЛЕЛЬНО с ожиданием процесса — очередь читателей должна быть
+    /// ИМЕННО конкурентной, потому что на СЕРИАЛЬНОЙ очереди stdout дочитался бы раньше stderr,
+    /// и ребёнок, забивший буфер stderr (64 КБ), застрял бы на write() до нашего read:
+    /// классический deadlock Process, ровно который этот код и объявляет предотвращённым —
+    /// и дедлайн на waitUntilExit: своего таймаута у Process нет, поэтому он уходит в
+    /// отдельную очередь, а мы ждём семафором; по таймауту процесс terminate'ится и
+    /// возвращается nil. Так зависший процесс не держит `refresh()` (а через него весь
+    /// popover) дольше пары секунд.
+    @discardableResult
+    private func runSilent(_ executable: String, arguments: [String], timeout: TimeInterval = 2) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        process.standardInput = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let box = ProcessOutputBox()
+        let reader = DispatchQueue(label: "nm.silent.read", qos: .userInitiated, attributes: .concurrent)
+        reader.async { box.append(outPipe.fileHandleForReading.readDataToEndOfFile()) }
+        reader.async { _ = errPipe.fileHandleForReading.readDataToEndOfFile() }
+
+        let exited = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            process.waitUntilExit()
+            exited.signal()
+        }
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
+            process.terminate()
+            return nil
+        }
+        guard process.terminationStatus == 0 else { return nil }
+        return box.string
+    }
+
+    /// Чтение SSID через НЕПРИВИЛЕГИРОВАННЫЙ `ipconfig getsummary <device>`:
+    /// что вычитали (`SSIDRead`) + есть ли признак ассоциации с сетью.
+    /// Привилегии здесь НЕ нужны: на macOS 15+ за скрытие SSID/BSSID отвечает глобальная
+    /// настройка HideWiFiInfo, одинаковая для всех uid (в том числе для root), — поэтому
+    /// читаем БЕЗ sudo, а не «с привилегиями». Проброс идёт через общий тихий раннер,
+    /// наружу не уходит ничего: ни ошибок, ни `lastError`, ни prompt'а.
+    private func readSSIDViaIpconfig(device: String) -> (read: SSIDRead, associated: Bool) {
+        guard let out = runSilent(Self.ipconfig, arguments: ["getsummary", device]) else {
+            return (.absent, false)
+        }
+        return (Self.parseSSID(fromIpconfigSummary: out),
+                Self.hasAssociationEvidence(fromIpconfigSummary: out))
+    }
+
+    /// Выключает глобальное скрытие Wi-Fi-инфо: `sudo -n /usr/sbin/ipconfig sethidewifiinfo 0`.
+    /// Возвращает true, если настройка выключилась.
+    ///
+    /// ВАЖНО, ПОЧЕМУ ЭТОТ ВЫЗОВ ТОЛЬКО ПРИ ДОКАЗАННОЙ РЕДИРЕКЦИИ: `sethidewifiinfo` меняет
+    /// СИСТЕМНУЮ приватность — после неё macOS отдаёт SSID/BSSID вообще всем процессам,
+    /// включая сторонние приложения. Это заметно более широкий эффект, чем «показать сеть
+    /// в поповерере», поэтому вызывается он только когда чтение вернуло именно `.redacted`
+    /// (строка `<redacted>`) И в том же выводе нашлась непустая `BSSID :` — то есть мы
+    /// ассоциированы с сетью, а имя от нас намеренно скрывают. Если SSID не найден вовсе
+    /// (`.absent`: Wi-Fi выключен, нет ассоциации, неверное устройство, Ethernet), скрывать
+    /// нечего и ломать настройку незачем. Не «упрощайте» вызов в шапку `getConnectionSummary`:
+    /// он будет дёргать системную настройку на каждом refresh, то есть на каждом открытии
+    /// поповера, даже когда SSID и так виден.
+    ///
+    /// Повторные попытки дёшевы и потому допустимы: успех лечит надолго (после него обычное
+    /// чтение всегда успешно и в этот код мы больше не попадаем), а неудача — быстрый `sudo -n`
+    /// с ненулевым exit (доли секунды), который молча уходит в false.
+    ///
+    /// Только `sudo -n` напрямую, НИКОГДА `runPrivilegedBin`: тот при неудаче падает в
+    /// osascript-fallback с системным диалогом пароля, а `getConnectionSummary()` зовётся из
+    /// `refresh()` на каждом открытии поповера — пользователь получил бы запрос пароля каждый
+    /// раз. Единственный осознанный единичный prompt остался в `installPasswordless`.
+    /// Применить `sudo -n ipconfig sethidewifiinfo <value>`; nil — не вышло.
+    /// Общий тихий путь для grant и restore: без prompt'а пароля (см. инвариант в `runSilent`),
+    /// с тем же таймаутом и с тем же правилом «верить тексту вывода, а не коду возврата».
+    private func setWiFiInfoHiding(_ value: String) -> Bool {
+        guard let out = runSilent(Self.sudo, arguments: ["-n", Self.ipconfig, "sethidewifiinfo", value]) else {
+            return false
+        }
+        // `ipconfig sethidewifiinfo` при нехватке прав печатает "failed to set hide WiFi info"
+        // и при этом ВЫХОДИТ С КОДОМ 0 — судить строго по тексту вывода, не по коду возврата.
+        // `sudo -n` без allowlist-гранта падает ненулевым кодом раньше — это тоже nil.
+        return !out.contains("failed")
+    }
+
+    /// Согласие пользователя: снять глобальное скрытие Wi-Fi-инфо и показать SSID.
+    /// Вызывает ТОЛЬКО UI по явному нажатию, из `refresh()` сюда пути нет.
+    /// Согласие пишется в UserDefaults ДО попытки: намерение пользователя сохраняется
+    /// даже если на этой машине нет allowlist-гранта (тогда SSID просто не появится,
+    /// а кнопка отката останется доступной). Успех → `isWiFiInfoRedactionDisabled`,
+    /// `lastSummary`, затем `refresh()`; неудача → `lastError` с подсказкой про allowlist.
+    func grantSSIDDisclosureConsent() {
+        DispatchQueue.main.async { [weak self] in
+            self?.ssidDisclosureConsent = true
+            self?.ssidDisclosureDeclined = false
+            UserDefaults.standard.set(true, forKey: Self.keySSIDConsent)
+            UserDefaults.standard.set(false, forKey: Self.keySSIDDeclined)
+            self?.isSSIDDisclosureAvailable = false
+            self?.isApplying = true
+            self?.lastSummary = nil
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let ok = self.setWiFiInfoHiding("0")
+            // Настройка применяется не мгновенно — даём системе время перечитать.
+            if ok { Thread.sleep(forTimeInterval: 0.5) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.isApplying = false
+                if ok {
+                    self.isWiFiInfoRedactionDisabled = true
+                    self.lastError = nil
+                    self.lastSummary = "Wi-Fi info hiding OFF (SSID/BSSID видны всем процессам)"
+                } else {
+                    self.isWiFiInfoRedactionDisabled = false
+                    self.lastSummary = nil
+                    self.lastError = "Не удалось снять скрытие Wi-Fi-инфо: нужен passwordless-грант "
+                        + "для `ipconfig sethidewifiinfo` в sudoers (см. «Enable passwordless»)."
                 }
+                self.refresh()
             }
         }
-        return "\(ssid), IP \(ip)"
+    }
+
+    /// Отказ от раскрытия SSID («не сейчас»): запоминаем в UserDefaults и больше
+    /// не предлагаем при каждом открытии поповера. Системные вызовы не нужны —
+    /// отказ ничего не меняет. Откат (`restoreWiFiInfoRedaction`) стирает и этот ключ,
+    /// поэтому после возврата скрытия вопрос снова может быть задан.
+    func declineSSIDDisclosureConsent() {
+        ssidDisclosureDeclined = true
+        ssidDisclosureConsent = false
+        UserDefaults.standard.set(true, forKey: Self.keySSIDDeclined)
+        UserDefaults.standard.set(false, forKey: Self.keySSIDConsent)
+        isSSIDDisclosureAvailable = false
+    }
+
+    /// Откат: вернуть системное скрытие Wi-Fi-инфо (`sethidewifiinfo default`) и
+    /// забыть решение пользователя. ВАЖНО: НЕ гейтим на сохранённом согласии —
+    /// вернуть приватность должен быть возможен всегда, даже если флаги говорят обратное
+    /// (например, согласие выдано, а настройку сняли руками в терминале).
+    /// Успех → `isWiFiInfoRedactionDisabled = false` + оба ключа UserDefaults очищены;
+    /// неудача → `lastError`; состояние macOS и ключи при этом НЕ трогаем, чтобы
+    /// не разойтись с реальностью.
+    func restoreWiFiInfoRedaction() {
+        DispatchQueue.main.async { [weak self] in
+            self?.isApplying = true
+            self?.lastSummary = nil
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let ok = self.setWiFiInfoHiding("default")
+            if ok { Thread.sleep(forTimeInterval: 0.5) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.isApplying = false
+                if ok {
+                    self.isWiFiInfoRedactionDisabled = false
+                    self.ssidDisclosureConsent = false
+                    self.ssidDisclosureDeclined = false
+                    UserDefaults.standard.set(false, forKey: Self.keySSIDConsent)
+                    UserDefaults.standard.set(false, forKey: Self.keySSIDDeclined)
+                    self.lastError = nil
+                    self.lastSummary = "Wi-Fi info hiding restored to macOS default"
+                } else {
+                    self.lastSummary = nil
+                    self.lastError = "Не удалось вернуть скрытие Wi-Fi-инфо: нужен passwordless-грант "
+                        + "для `ipconfig sethidewifiinfo` в sudoers (см. «Enable passwordless»)."
+                }
+                self.refresh()
+            }
+        }
+    }
+
+    /// Сводка подключения БЕЗ привилегий, НЕ бросает (внутри try? + fallback "unknown"):
+    /// SSID через самовосстанавливающийся `ipconfig getsummary`
+    /// + IP через `networksetup -getinfo <первый wifi-сервис>` (строка "IP address:").
+    /// Короткое имя активной сети для строки "Connected".
+    ///
+    /// Механизм скрытия SSID на macOS 15+ — ГЛОБАЛЬНАЯ настройка HideWiFiInfo, а не права
+    /// процесса: пока она включена, `ipconfig getsummary` печатает `SSID : <redacted>` и
+    /// `BSSID : <redacted>` ОДИНАКОВО для всех uid, включая root. Поэтому правами тут
+    /// ничего не выиграть, и порядок источников такой:
+    /// 1) `ipconfig getsummary` БЕЗ sudo — обычный быстрый путь, в нормальном состоянии
+    ///    системы он сразу отдаёт реальное имя сети;
+    /// 2) если имя СИСТЕМНО скрыто — вывод содержит `SSID : <redacted>` И непустую
+    ///    `BSSID :` (признак ассоциации), — сами мы ничего не меняем: это глобальная
+    ///    настройка приватности, поэтому только выставляем `isSSIDDisclosureAvailable`,
+    ///    а снятие скрытия делает пользователь по явному согласию
+    ///    (`grantSSIDDisclosureConsent`, отказ — `declineSSIDDisclosureConsent`,
+    ///    откат — `restoreWiFiInfoRedaction`). Prompt'ов пароля здесь не бывает by design:
+    ///    `sudo -n` без osascript-fallback;
+    /// 3) `networksetup -getairportnetwork` — последний резерв для старых macOS: на 15.7.9
+    ///    он безусловно печатает "You are not associated with an AirPort network." даже при
+    ///    живой ассоциации (именно он раньше и давал ложное "нет сети"), поэтому его фильтр
+    ///    служебных фраз остаётся корректным — он отсекает ложное срабатывание.
+    /// Дальше — без изменений: службы Wi-Fi, затем Ethernet, затем "нет сети".
+    /// IP сюда НЕ входит: он уже показан отдельной строкой статуса.
+    /// Если Wi-Fi не ассоциирован, но живой Ethernet — показываем его службу,
+    /// т.к. Ethernet-службы в этом приложении равноправны с Wi-Fi.
+    func getConnectionSummary() -> String {
+        let device = (try? detectWiFiDevice()) ?? "en0"
+        let probe = readSSIDViaIpconfig(device: device)
+        // Шаг 1: непривилегированное чтение — обычно сразу успех.
+        if case .value(let ssid) = probe.read { return ssid }
+        // Шаг 2: макос именно СКРЫВАЕТ имя ассоциированной сети. Само снятие скрытия —
+        // системная настройка приватности, поэтому мы её НЕ делаем молча: только выставляем
+        // флаг для UI (`isSSIDDisclosureAvailable`), чтобы предложить выбор. Согласие даёт
+        // `grantSSIDDisclosureConsent`, отказ — `declineSSIDDisclosureConsent`. На `.absent`
+        // (Wi-Fi выключен / нет ассоциации / неверное устройство / Ethernet) вопрос не
+        // показываем: спрашивать не о чем.
+        if case .redacted = probe.read, probe.associated {
+            let shouldOffer = !ssidDisclosureConsent && !ssidDisclosureDeclined
+            DispatchQueue.main.async { [weak self] in
+                self?.isSSIDDisclosureAvailable = shouldOffer
+            }
+        } else {
+            // Скрытия больше нет (или сети нет) — предложение снимаем в любом случае,
+            // иначе флаг мог бы «залипнуть» после успешного grant/отката.
+            DispatchQueue.main.async { [weak self] in
+                self?.isSSIDDisclosureAvailable = false
+            }
+        }
+        if let out = try? run(["-getairportnetwork", device]) {
+            let ssid = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isServiceMessage = ssid.isEmpty
+                || ssid.hasPrefix("You are not associated")
+                || ssid.lowercased().hasPrefix("could not find")
+            if !isServiceMessage { return ssid }
+        }
+        // Живой Wi-Fi без читаемого SSID (не снялось скрытие инфо, нет allowlist
+        // на sudo, старый непривилегированный macOS) — показываем имя службы,
+        // а НЕ «нет сети»: сеть-то поднята, и это правда. Раньше Wi-Fi-службы в этом цикле
+        // пропускались целиком, поэтому подключённый но «слепой» Wi-Fi выглядел как обрыв.
+        for service in ((try? getAllServices()) ?? []) where Self.isWiFiService(service) {
+            guard (try? getServiceEnabled(service)) == true else { continue }
+            let ip = getIPAddress(service: service)
+            if !ip.isEmpty && ip != "?" { return service }
+        }
+        for service in ((try? getAllServices()) ?? []) where !Self.isWiFiService(service) {
+            guard (try? getServiceEnabled(service)) == true else { continue }
+            let ip = getIPAddress(service: service)
+            if !ip.isEmpty && ip != "?" { return service }
+        }
+        return "нет сети"
     }
 
     // MARK: - Setters (с привилегиями: сначала sudo -n, fallback — системный prompt)
-
-    /// `networksetup -switchtolocation <location>` (sudo).
-    func switchLocation(_ location: String) throws {
-        try runPrivilegedBin(path: Self.networksetup, args: ["-switchtolocation", location])
-    }
 
     /// `networksetup -setnetworkserviceenabled <service> on|off` (sudo).
     func setServiceEnabled(_ service: String, enabled: Bool) throws {
@@ -552,11 +864,6 @@ final class NetworkManager: ObservableObject {
         try flushDNS()
     }
 
-    /// Один DNS — обёртка над `setDNSServers(service:servers:)` (sudo + verify + flush).
-    func setDNS(service: String, dns: String) throws {
-        try setDNSServers(service: service, servers: [dns])
-    }
-
     /// Сброс DNS на автоматические (DHCP): `networksetup -setdnsservers <service> empty` (sudo)
     /// + `flushDNS()`. Verify не строгий: успех = отсутствие ошибки.
     func clearDNS(service: String) throws {
@@ -596,6 +903,60 @@ final class NetworkManager: ObservableObject {
         return try runOsascriptPrivileged("/bin/sh \(Self.shellQuote(scriptPath))")
     }
 
+    // MARK: - Autostart (SMAppService)
+
+    /// Текущее состояние автозапуска через SMAppService.mainApp.
+    func isAutostartEnabled() -> Bool {
+        SMAppService.mainApp.status == .enabled
+    }
+
+    /// Вкл/выкл автозапуска. Ошибку register (частый кейс — приложение
+    /// не в /Applications) бросает как есть, без обёрток.
+    func setAutostart(enabled: Bool) throws {
+        if enabled {
+            try SMAppService.mainApp.register()
+        } else {
+            try SMAppService.mainApp.unregister()
+        }
+    }
+
+    /// Установка желаемого состояния автозапуска (фон, как остальные apply).
+    /// Вызывается из set-кложура явного Binding в UI, поэтому программные
+    /// публикации `autostartEnabled` из `refresh()` сюда не попадают: SwiftUI не вызывает
+    /// set-клозору у Binding на программном изменении источника истины (он лишь перерисует
+    /// view), поэтому и get здесь безопасен — цикла не возникает.
+    /// Идемпотентно: совпадение с фактическим состоянием — no-op + `refresh()`.
+    /// Ошибки → `lastError` текстом без обёрток, успех → `lastSummary`, в конце `refresh()`.
+    func setAutostartEnabled(_ desired: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            self?.isApplying = true
+            self?.lastError = nil
+            self?.lastSummary = nil
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            var failure: String?
+            var summary: String?
+            do {
+                if self.isAutostartEnabled() != desired {
+                    try self.setAutostart(enabled: desired)
+                }
+                summary = "Launch at login \(desired ? "ON" : "OFF")"
+            } catch {
+                failure = error.localizedDescription
+            }
+            let capturedFailure = failure
+            let capturedSummary = summary
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.isApplying = false
+                self.lastError = capturedFailure
+                self.lastSummary = capturedSummary
+                self.refresh()
+            }
+        }
+    }
+
     // MARK: - High-level logic
 
     /// Обновить статус (вызывать из UI). Тяжёлая работа — в фоне.
@@ -606,6 +967,7 @@ final class NetworkManager: ObservableObject {
             var serviceStates: [ServiceState] = []
             var failure: String?
             let passwordless = self.isPasswordless()
+            let autostart = self.isAutostartEnabled()
             do {
                 status.wifiDevice = try self.detectWiFiDevice()
                 status.wifiPowerOn = try self.getWiFiPower(device: status.wifiDevice)
@@ -637,6 +999,7 @@ final class NetworkManager: ObservableObject {
             let capturedServices = serviceStates
             let capturedFailure = failure
             let capturedPasswordless = passwordless
+            let capturedAutostart = autostart
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 self.wifiDevice = capturedStatus.wifiDevice
@@ -648,19 +1011,28 @@ final class NetworkManager: ObservableObject {
                 self.ipAddress = capturedStatus.ipAddress
                 self.gateway = capturedStatus.gateway
                 self.passwordlessReady = capturedPasswordless
-                self.lastError = capturedFailure
+                self.autostartEnabled = capturedAutostart
+                // Асимметрия с остальными apply-методами, где `lastError = capturedFailure`
+                // (там присваивание nil корректно — операция сбрасывает СВОЮ прошлую
+                // ошибку). З.refresh() вызывается в конце каждого apply, и его собственный
+                // failure почти всегда nil: безусловное присваивание стирало бы ошибку,
+                // которую apply только что показал, через ~100 мс после неё. Поэтому refresh
+                // трогает lastError ТОЛЬКО если сам что-то упал, и не мешает чужому
+                // сообщению дожить до следующего осознанного действия пользователя.
+                if let capturedFailure { self.lastError = capturedFailure }
             }
         }
     }
 
     /// Вкл/выкл одной сетевой службы (фон, как остальные apply).
     /// Эксклюзивность: в один момент активна только одна не-VPN служба —
-    /// при ВКЛЮЧЕНИИ не-VPN службы все остальные не-VPN гасятся
-    /// (каждая через `setServiceEnabled(..., false)`), VPN остаются как есть.
-    /// При включении VPN и при ВЫКЛЮЧЕНИИ любой службы — только она сама.
+    /// при ВКЛЮЧЕНИИ конкурирующего аплинка (Wi-Fi или Ethernet) другие такие же
+    /// конкуренты гасятся (каждая через `setServiceEnabled(..., false)`);
+    /// VPN, мосты, USB-тетердинг, PAN и виртуальные адаптеры — никогда (см.
+    /// `isCompetingUplink`). При включении VPN и при ВЫКЛЮЧЕНИИ любой службы —
+    /// только она сама.
     /// Wi-Fi службы — особый случай поверх эксклюзивности: дополнительно питание
-    /// радиомодуля (`setWiFiPower` + verify), при включении — фоновый `scanWiFi()`
-    /// (режим поиска для Control Center). Не-Wi-Fi службы — только enable/disable.
+    /// радиомодуля (`setWiFiPower` + verify). Не-Wi-Fi службы — только enable/disable.
     /// Ошибки → `lastError`, успех → `lastSummary` ("Service 'X' ON/OFF"), в конце `refresh()`.
     func setService(name: String, enabled: Bool) {
         DispatchQueue.main.async { [weak self] in
@@ -678,11 +1050,15 @@ final class NetworkManager: ObservableObject {
                 let device = (try? self.detectWiFiDevice()) ?? "en0"
                 // 1. Сама служба.
                 try self.setServiceEnabled(name, enabled: enabled)
-                // 2. Эксклюзивность: включаем не-VPN — гасим все остальные не-VPN.
+                // 2. Эксклюзивность: включаем КОНКУРИРУЮЩИЙ аплинк — гасим другие
+                // конкурирующие аплинки (Wi-Fi ↔ Ethernet). Мосты, USB-тетердинг, PAN и
+                // виртуальные адаптеры конкурентами не считаются и остаются как были:
+                // иначе включение Wi-Fi убивало бы Thunderbolt Bridge и iPhone USB.
+                // VPN не трогаем, как и раньше.
                 var exclusiveOthers: [String] = []
-                if enabled && !isVPN {
+                if enabled && !isVPN && Self.isCompetingUplink(name) {
                     for other in try self.getAllServices()
-                            where other != name && !Self.isVPNService(other) {
+                            where other != name && Self.isCompetingUplink(other) {
                         try self.setServiceEnabled(other, enabled: false)
                         exclusiveOthers.append(other)
                     }
@@ -709,7 +1085,7 @@ final class NetworkManager: ObservableObject {
                         )
                     }
                 }
-                // 4. Wi-Fi: питание радиомодуля + verify; при включении — фоновый скан.
+                // 4. Wi-Fi: питание радиомодуля + verify.
                 if isWiFi {
                     try self.setWiFiPower(device: device, on: enabled)
                     let actualPower = try self.getWiFiPower(device: device)
@@ -719,10 +1095,6 @@ final class NetworkManager: ObservableObject {
                             expected: enabled ? "On" : "Off",
                             actual: actualPower ? "On" : "Off"
                         )
-                    }
-                    if enabled {
-                        // Режим поиска: обновляем список сетей для Control Center (best-effort).
-                        _ = self.scanWiFi()
                     }
                 }
                 summary = "Service '\(name)' \(enabled ? "ON" : "OFF")"
@@ -805,6 +1177,120 @@ final class NetworkManager: ObservableObject {
                 let active = try self.resolveActiveService()
                 try self.clearDNS(service: active)
                 summary = "DNS for '\(active)' → Auto (DHCP)"
+            } catch {
+                failure = error.localizedDescription
+            }
+            let capturedFailure = failure
+            let capturedSummary = summary
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.isApplying = false
+                self.lastError = capturedFailure
+                self.lastSummary = capturedSummary
+                self.refresh()
+            }
+        }
+    }
+
+    /// Разобранный список DNS-серверов активной службы (первая включённая, не VPN).
+    /// Сырой вывод getDNS — многострочный текст; при отсутствии ручных серверов
+    /// networksetup отдаёт "?" или "There aren't any DNS Servers set on ...".
+    /// Эти маркеры отфильтровываются, результат — только валидные адреса.
+    /// Чистое чтение опубликованного состояния: без Process и без побочных эффектов,
+    /// безопасно вызывать прямо из SwiftUI `body`.
+    var activeDNSServers: [String] {
+        guard let active = activeServiceName(), let raw = currentDNS[active] else { return [] }
+        return raw.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0 != "?" && Self.isValidDNS($0) }
+    }
+
+    /// Добавляет один DNS-сервер в ручной список активной службы (фон, как остальные apply).
+    /// Адрес проверяется `isValidDNS` ДО системных вызовов — мусор в GUI не должен доходить до sudo.
+    /// В отличие от removeDNSServer ничего не выбрасывает: текущий список сохраняется целиком,
+    /// новый адрес дописывается в конец. Если DNS сейчас на DHCP/auto (список пуст), результат —
+    /// одно-серверный ручной список; clearDNS здесь не вызывается намеренно, иначе «добавить»
+    /// тихо сбрасывало бы DHCP-адреса, выданные провайдером.
+    /// Повторное добавление того же адреса — no-op с понятным summary, чтобы double-tap по кнопке
+    /// не гонял `networksetup` вхолостую.
+    /// Ошибки → `lastError`, успех → `lastSummary`, в конце `refresh()`.
+    func addDNSServer(_ server: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.isApplying = true
+            self?.lastError = nil
+            self?.lastSummary = nil
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            var failure: String?
+            var summary: String?
+            do {
+                let active = try self.resolveActiveService()
+                guard Self.isValidDNS(server) else {
+                    // Невалидный адрес: систему не трогаем, только дружелюбная ошибка в lastError.
+                    throw NetworkManagerError.invalidDNS(address: server)
+                }
+                let current = (try? self.getDNS(service: active)) ?? "?"
+                let list = current.components(separatedBy: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty && $0 != "?" && Self.isValidDNS($0) }
+                if list.contains(server) {
+                    // Сервер уже задан — систему не трогаем, только дружелюбный summary.
+                    summary = "DNS for '\(active)' → без изменений (\(server) уже есть)"
+                } else {
+                    // Хвост сохраняем, новый адрес в конец (при пустом списке это единственный сервер).
+                    let updated = list + [server]
+                    try self.setDNSServers(service: active, servers: updated)
+                    summary = "DNS for '\(active)' → \(updated.joined(separator: " "))"
+                }
+            } catch {
+                failure = error.localizedDescription
+            }
+            let capturedFailure = failure
+            let capturedSummary = summary
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.isApplying = false
+                self.lastError = capturedFailure
+                self.lastSummary = capturedSummary
+                self.refresh()
+            }
+        }
+    }
+
+    /// Удаляет один DNS-сервер из активной службы.
+    /// Если это последний ручной сервер — уходит в clearDNS (DHCP), т.к. setDNSServers([])
+    /// бросает invalidDNS("(empty — use Auto for DHCP)").
+    func removeDNSServer(_ server: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.isApplying = true
+            self?.lastError = nil
+            self?.lastSummary = nil
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            var failure: String?
+            var summary: String?
+            do {
+                let active = try self.resolveActiveService()
+                let current = (try? self.getDNS(service: active)) ?? "?"
+                let list = current.components(separatedBy: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty && $0 != "?" && Self.isValidDNS($0) }
+                if !list.contains(server) {
+                    // Сервера нет в списке — систему не трогаем, только дружелюбный summary.
+                    summary = "DNS for '\(active)' → без изменений (\(server) не задан)"
+                } else {
+                    let remaining = list.filter { $0 != server }
+                    if remaining.isEmpty {
+                        // Последний ручной сервер: сброс на автоматические (DHCP).
+                        try self.clearDNS(service: active)
+                        summary = "DNS for '\(active)' → DHCP (последний сервер удалён)"
+                    } else {
+                        try self.setDNSServers(service: active, servers: remaining)
+                        summary = "DNS for '\(active)' → \(remaining.joined(separator: " "))"
+                    }
+                }
             } catch {
                 failure = error.localizedDescription
             }
