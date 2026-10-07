@@ -131,8 +131,3 @@ sudo rm /etc/sudoers.d/network-manager
 | `scripts/build-and-deploy.sh` | Release build + install to `/Applications` (`--run` to launch, `--clean` for clean build) |
 | `scripts/install-passwordless-sudo.sh` | Installs the sudoers allowlist (one password prompt) |
 
----
-
-## License
-
-MIT
