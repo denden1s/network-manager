@@ -1,2 +1,6 @@
 .DS_Store
 build/
+
+# Сборный образ: create-dmg.sh кладёт его в корень репозитория, артефактом он живёт
+# в GitHub Releases, в репозитории ему не место.
+NetworkManager.dmg

@@ -65,6 +65,9 @@ trap 'cleanup; exit 143' TERM
 
 echo "==> Creating DMG..."
 DMG_TMP="$(mktemp -d)"
+# Spotlight индексирует staging-папку и держит на файлах ресурсы, пока hdiutil
+# их читает — метка отключает индексацию и снимает этот класс помех.
+touch "$DMG_TMP/.metadata_never_index"
 cp -R "$BUILT_APP" "$DMG_TMP/"
 ln -s /Applications "$DMG_TMP/Applications"
 
@@ -77,12 +80,31 @@ cp "$SCRIPTS_DIR/install-autostart.sh" "$DMG_TMP/Scripts/"
 chmod +x "$DMG_TMP/Scripts/"*.sh
 
 rm -f "$DMG_NAME"
-if ! hdiutil create -volname "Network Manager" -srcfolder "$DMG_TMP" -ov -format UDZO "$DMG_NAME"; then
+# На GitHub-раннерах hdiutil периодически падает с «Resource busy»: XProtectBehaviorService
+# и Spotlight в этот момент держат ресурсы диска. Команда у нас корректная, это флаки
+# окружения, поэтому не чиним вызов, а повторяем его.
+DMG_CREATED=false
+for attempt in 1 2 3 4 5; do
+  # Прошлый упавший запуск мог оставить том смонтированным — снимаем перед новой попыткой.
+  hdiutil detach -force "/Volumes/Network Manager" >/dev/null 2>&1 || true
+  if hdiutil create -volname "Network Manager" -srcfolder "$DMG_TMP" -ov -format UDZO "$DMG_NAME"; then
+    DMG_CREATED=true
+    break
+  fi
   # hdiutil при ошибке может оставить огрызок образа — он негодный, убираем.
   rm -f "$DMG_NAME"
-  echo "error: hdiutil create не удался (см. вывод выше)" >&2
+  if [ "$attempt" -lt 5 ]; then
+    echo "==> hdiutil не справился (попытка $attempt/5), повтор через $((attempt * 5)) с" >&2
+    sleep $((attempt * 5))
+  fi
+done
+
+if [ "$DMG_CREATED" != true ]; then
+  rm -f "$DMG_NAME"
+  echo "error: hdiutil create не удался после 5 попыток (см. вывод выше)" >&2
   exit 1
 fi
+
 rm -rf "$DMG_TMP"
 DMG_TMP=""
 
